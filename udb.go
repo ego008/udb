@@ -1,4 +1,4 @@
-// Package bdb is a Bolt wrapper that allows easy store hash, zset data.
+// Package udb is a Bolt wrapper that allows easy store hash, zset data.
 package udb
 
 import (
