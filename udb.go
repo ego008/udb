@@ -1,5 +1,5 @@
 // Package bdb is a Bolt wrapper that allows easy store hash, zset data.
-package bdb
+package udb
 
 import (
 	"bytes"
@@ -72,6 +72,22 @@ func Open(path string) (*DB, error) {
 // Close closes the embedded bolt.DB.
 func (db *DB) Close() error {
 	return db.DB.Close()
+}
+
+// View2 wrap View
+func (db *DB) View2(fn func() error) error {
+	return db.DB.View(func(tx *bolt.Tx) error {
+		db.Tx = tx
+		return fn()
+	})
+}
+
+// Update2 wrap Update
+func (db *DB) Update2(fn func() error) error {
+	return db.DB.Update(func(tx *bolt.Tx) error {
+		db.Tx = tx
+		return fn()
+	})
 }
 
 // Hset set the byte value in argument as value of the key of a hashmap.
