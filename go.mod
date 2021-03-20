@@ -1,4 +1,4 @@
-module github.com/ego008/bdb
+module github.com/ego008/udb
 
 go 1.16
 
