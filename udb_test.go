@@ -1,4 +1,4 @@
-package bdb
+package udb
 
 import (
 	"errors"
