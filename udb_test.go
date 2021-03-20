@@ -27,9 +27,31 @@ func TestTx_Hset(t *testing.T) {
 	}
 }
 
+func TestTx_Hset2(t *testing.T) {
+	err = db.Update2(func() error {
+		return db.Hset(bucket, []byte("key1"), []byte("value1"))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTx_Hget(t *testing.T) {
 	err = db.View(func(tx *bolt.Tx) error {
 		db.Tx = tx
+		rs := db.Hget(bucket, []byte("key1"))
+		if rs.String() != "value1" {
+			return errors.New(" Hget err")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTx_Hget2(t *testing.T) {
+	err = db.View2(func() error {
 		rs := db.Hget(bucket, []byte("key1"))
 		if rs.String() != "value1" {
 			return errors.New(" Hget err")
