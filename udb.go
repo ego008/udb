@@ -6,23 +6,26 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"github.com/boltdb/bolt"
-	"reflect"
-	"runtime"
+	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 	"unsafe"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 const (
-	replyOK               = "ok"
-	replyNotFound         = "not_found"
-	replyError            = "error"
-	bucketNotFound        = "bucket_not_found"
-	keyNotFound           = "key_not_found"
-	kvpLen                = "kvs len must is an even number"
-	scoreMin       uint64 = 0
-	scoreMax       uint64 = 18446744073709551615
+	replyOK                 = "ok"
+	replyNotFound           = "not_found"
+	replyError              = "error"
+	bucketNotFound          = "bucket_not_found"
+	keyNotFound             = "key_not_found"
+	kvpLen                  = "kvs len must is an even number"
+	scoreMin         uint64 = 0
+	scoreMax         uint64 = ^uint64(0)
+	uint64EncodedLen        = 8
 )
 
 var (
@@ -40,10 +43,11 @@ type (
 	BS []byte
 	// DB embeds a bolt.DB.
 	DB struct {
-		*bolt.DB
+		db *bolt.DB
+		wg sync.WaitGroup // 等待组，用于优雅关闭
 	}
 
-	// Reply a holder for a Entry list of a hashmap.
+	// Reply a holder for an Entry list of a hashmap.
 	Reply struct {
 		State string
 		Data  []BS
@@ -55,33 +59,60 @@ type (
 	}
 )
 
-// Open creates/opens a bolt.DB at specified path, and returns a DB enclosing the same.
 func Open(path string) (*DB, error) {
-	database, err := bolt.Open(path, 0600, &bolt.Options{Timeout: 1 * time.Second})
+	return OpenWithMode(path, 0o600)
+}
+
+// OpenWithMode opens a database using the supplied file mode.
+func OpenWithMode(path string, mode os.FileMode) (*DB, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("empty database path")
+	}
+	database, err := bolt.Open(path, mode, &bolt.Options{Timeout: time.Second})
 	if err != nil {
 		return nil, err
 	}
+	return &DB{db: database}, nil
+}
 
-	db := DB{database}
+// View executes a read-only transaction.
+func (db *DB) View(fn func(*bolt.Tx) error) error {
+	if db == nil || db.db == nil {
+		return errors.New("nil database")
+	}
+	if fn == nil {
+		return errors.New("nil transaction callback")
+	}
+	db.wg.Add(1)
+	defer db.wg.Done()
+	return db.db.View(fn)
+}
 
-	return &db, nil
+// Update executes a read-write transaction.
+func (db *DB) Update(fn func(*bolt.Tx) error) error {
+	if db == nil || db.db == nil {
+		return errors.New("nil database")
+	}
+	if fn == nil {
+		return errors.New("nil transaction callback")
+	}
+	db.wg.Add(1)
+	defer db.wg.Done()
+	return db.db.Update(fn)
 }
 
 // Close closes the embedded bolt.DB.
 func (db *DB) Close() error {
-	return db.DB.Close()
+	db.wg.Wait()
+	return db.db.Close()
 }
 
 // Hset set the byte value in argument as value of the key of a hashmap.
 func (db *DB) Hset(tx *bolt.Tx, name string, key, val []byte) error {
 	bucketName := Bconcat(hashPrefix, S2b(name))
-	b := tx.Bucket(bucketName)
-	if b == nil {
-		var err error
-		b, err = tx.CreateBucket(bucketName)
-		if err != nil {
-			return err
-		}
+	b, err := tx.CreateBucketIfNotExists(bucketName)
+	if err != nil {
+		return err
 	}
 	return b.Put(key, val)
 }
@@ -93,40 +124,32 @@ func (db *DB) Hmset(tx *bolt.Tx, name string, kvs ...[]byte) error {
 	}
 	bucketName := Bconcat(hashPrefix, S2b(name))
 
-	var err error
-	b := tx.Bucket(bucketName)
-	if b == nil {
-		b, err = tx.CreateBucket(bucketName)
-		if err != nil {
-			return err
-		}
+	b, err := tx.CreateBucketIfNotExists(bucketName)
+	if err != nil {
+		return err
 	}
-	for i := 0; i < (len(kvs) - 1); i += 2 {
-		err = b.Put(kvs[i], kvs[i+1])
-		if err != nil {
-			return err
-		}
-	}
-	return err
 
+	for i := 0; i < len(kvs)-1; i += 2 {
+		if err = b.Put(kvs[i], kvs[i+1]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Hincr increment the number stored at key in a hashmap by step.
 func (db *DB) Hincr(tx *bolt.Tx, name string, key []byte, step int64) (uint64, error) {
 	bucketName := Bconcat(hashPrefix, S2b(name))
-	b := tx.Bucket(bucketName)
-	if b == nil {
-		var err error
-		b, err = tx.CreateBucket(bucketName)
-		if err != nil {
-			return 0, err
-		}
+	b, err := tx.CreateBucketIfNotExists(bucketName)
+	if err != nil {
+		return 0, err
 	}
+
 	var oldNum uint64
-	v := b.Get(key)
-	if v != nil {
+	if v := b.Get(key); v != nil {
 		oldNum = B2i(v)
 	}
+
 	if step > 0 {
 		if (scoreMax - uint64(step)) < oldNum {
 			return 0, ErrOverFlowNumber
@@ -139,11 +162,10 @@ func (db *DB) Hincr(tx *bolt.Tx, name string, key []byte, step int64) (uint64, e
 		oldNum -= uint64(-step)
 	}
 
-	err := b.Put(key, I2b(oldNum))
+	err = b.Put(key, I2b(oldNum))
 	if err != nil {
 		return 0, err
 	}
-
 	return oldNum, nil
 }
 
@@ -177,10 +199,7 @@ func (db *DB) HdelBucket(tx *bolt.Tx, name string) error {
 
 // Hget get the value related to the specified key of a hashmap.
 func (db *DB) Hget(tx *bolt.Tx, name string, key []byte) *Reply {
-	r := &Reply{
-		State: replyError,
-		Data:  []BS{},
-	}
+	r := &Reply{State: replyError, Data: []BS{}}
 	bucketName := Bconcat(hashPrefix, S2b(name))
 
 	b := tx.Bucket(bucketName)
@@ -195,7 +214,6 @@ func (db *DB) Hget(tx *bolt.Tx, name string, key []byte) *Reply {
 	}
 	r.State = replyOK
 	r.Data = append(r.Data, v)
-
 	return r
 }
 
@@ -706,8 +724,12 @@ func (db *DB) Zscan(tx *bolt.Tx, name string, keyStart, scoreStart []byte, limit
 	n := 0
 
 	for k, _ := c.Seek(scoreStartB); k != nil; k, _ = c.Next() {
+		// 增加长度安全检查，防止切片越界 Panic
+		if len(k) < uint64EncodedLen {
+			continue
+		}
 		if bytes.Compare(k, startScoreKeyB) == 1 {
-			r.Data = append(r.Data, k[8:], k[0:8])
+			r.Data = append(r.Data, k[uint64EncodedLen:], k[0:uint64EncodedLen])
 			n++
 			if n == limit {
 				break
@@ -760,7 +782,7 @@ func (db *DB) Zrscan(tx *bolt.Tx, name string, keyStart, scoreStart []byte, limi
 	n := 0
 	for k, _ := k0, v0; k != nil; k, _ = c.Prev() {
 		if bytes.Compare(k, startScoreKeyB) == -1 {
-			r.Data = append(r.Data, k[8:], k[0:8])
+			r.Data = append(r.Data, k[uint64EncodedLen:], k[0:uint64EncodedLen])
 			n++
 			if n == limit {
 				break
@@ -780,6 +802,24 @@ func (r *Reply) OK() bool {
 
 func (r *Reply) NotFound() bool {
 	return r.State == replyNotFound
+}
+
+// Clone 深度拷贝 Reply 中的 mmap 数据。
+// 重要：如果在 bolt.Tx 事务闭包外使用 Reply 数据，必须调用此方法以防止段错误。
+func (r *Reply) Clone() *Reply {
+	if len(r.Data) == 0 {
+		return r
+	}
+	newReply := &Reply{
+		State: r.State,
+		Data:  make([]BS, len(r.Data)),
+	}
+	for i, b := range r.Data {
+		copied := make([]byte, len(b))
+		copy(copied, b)
+		newReply.Data[i] = copied
+	}
+	return newReply
 }
 
 func (r *Reply) Bytes() []byte {
@@ -820,7 +860,7 @@ func (r *Reply) Uint64() uint64 {
 	if len(r.Data) < 1 {
 		return 0
 	}
-	if len(r.Data[0]) < 8 {
+	if len(r.Data[0]) < uint64EncodedLen {
 		return 0
 	}
 	return binary.BigEndian.Uint64(r.Data[0])
@@ -866,7 +906,13 @@ func (r *Reply) KvEach(fn func(key, value BS)) int {
 // JSON parses the JSON-encoded Reply Entry value and stores the result
 // in the value pointed to by v.
 func (r *Reply) JSON(v interface{}) error {
-	return json.Unmarshal(r.Data[0], &v)
+	if r == nil || len(r.Data) == 0 {
+		return errors.New("empty reply")
+	}
+	if v == nil {
+		return errors.New("nil json destination")
+	}
+	return json.Unmarshal(r.Data[0], v)
 }
 
 func (b BS) Bytes() []byte {
@@ -894,7 +940,7 @@ func (b BS) Uint() uint {
 
 // Uint64 is a convenience wrapper over Get for uint64 value of a hashmap.
 func (b BS) Uint64() uint64 {
-	if len(b) < 8 {
+	if len(b) < uint64EncodedLen {
 		return 0
 	}
 	return binary.BigEndian.Uint64(b)
@@ -903,19 +949,21 @@ func (b BS) Uint64() uint64 {
 // JSON parses the JSON-encoded Reply Entry value and stores the result
 // in the value pointed to by v.
 func (b BS) JSON(v interface{}) error {
-	return json.Unmarshal(b, &v)
+	if v == nil {
+		return errors.New("nil json destination")
+	}
+	return json.Unmarshal(b, v)
 }
 
-// Bconcat concat a list of byte
+// Bconcat 性能略微优化的实现
 func Bconcat(slices ...[]byte) []byte {
 	var totalLen int
 	for _, s := range slices {
 		totalLen += len(s)
 	}
-	tmp := make([]byte, totalLen)
-	var i int
+	tmp := make([]byte, 0, totalLen)
 	for _, s := range slices {
-		i += copy(tmp[i:], s)
+		tmp = append(tmp, s...)
 	}
 	return tmp
 }
@@ -943,7 +991,7 @@ func DS2i(v string) uint64 {
 // I2b returns an 8-byte big endian representation of v
 // v uint64(123456) -> 8-byte big endian.
 func I2b(v uint64) []byte {
-	b := make([]byte, 8)
+	b := make([]byte, uint64EncodedLen)
 	binary.BigEndian.PutUint64(b, v)
 	return b
 }
@@ -951,6 +999,9 @@ func I2b(v uint64) []byte {
 // B2i return an int64 of v
 // v (8-byte big endian) -> uint64(123456).
 func B2i(v []byte) uint64 {
+	if len(v) < uint64EncodedLen {
+		return 0
+	}
 	return binary.BigEndian.Uint64(v)
 }
 
@@ -960,23 +1011,18 @@ func B2ds(v []byte) string {
 	return strconv.FormatUint(binary.BigEndian.Uint64(v), 10)
 }
 
-// B2s converts byte slice to a string without memory allocation.
-// []byte("abc") -> "abc" s
+// B2s converts byte slice to a string without memory allocation (Go 1.20+ safe).
 func B2s(b []byte) string {
-	/* #nosec G103 */
-	return *(*string)(unsafe.Pointer(&b))
+	if len(b) == 0 {
+		return ""
+	}
+	return unsafe.String(unsafe.SliceData(b), len(b))
 }
 
-// S2b converts string to a byte slice without memory allocation.
-// "abc" -> []byte("abc")
-func S2b(s string) (b []byte) {
-	/* #nosec G103 */
-	bh := (*reflect.SliceHeader)(unsafe.Pointer(&b))
-	/* #nosec G103 */
-	sh := (*reflect.StringHeader)(unsafe.Pointer(&s))
-	bh.Data = sh.Data
-	bh.Cap = sh.Len
-	bh.Len = sh.Len
-	runtime.KeepAlive(&s)
-	return b
+// S2b converts string to a byte slice without memory allocation (Go 1.20+ safe).
+func S2b(s string) []byte {
+	if len(s) == 0 {
+		return nil
+	}
+	return unsafe.Slice(unsafe.StringData(s), len(s))
 }
