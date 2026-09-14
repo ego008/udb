@@ -351,3 +351,51 @@ Applications should close the pipeline before closing the database:
 ```text
 producers -> bounded queue -> batch collector -> single writer -> one bbolt Update
 ```
+
+## V5.21 adaptive write pipeline and observability
+
+V5.21 keeps the V5.20 asynchronous write semantics and adds runtime
+observability and adaptive batching.
+
+### Metrics
+
+`PipelineStats` now exposes queue depth/capacity, transaction and batch counts,
+total and last commit latency, min/max latency, average batch size, average
+commit latency and an approximate committed throughput. Metrics are snapshots;
+they do not affect ordering or transaction semantics.
+
+### Batch policy
+
+The optional `BatchPolicy` interface selects a target batch size for each new
+transaction. `FixedBatchPolicy` provides deterministic behavior. The
+`AdaptiveBatchPolicy` is a conservative feedback controller using queue
+pressure and observed commit latency. It is bounded by `MinBatchSize` and
+`MaxBatchSize` and is capped by `WritePipelineOptions.MaxBatchSize`.
+
+Example:
+
+```go
+policy := udb.DefaultAdaptiveBatchPolicy()
+p, err := db.NewWritePipeline(udb.WritePipelineOptions{
+    MaxBatchSize: 1000,
+    MaxWait: 5 * time.Millisecond,
+    QueueSize: 4096,
+    BatchPolicy: policy,
+})
+```
+
+### Backpressure
+
+`WritePipelineOptions.Backpressure` supports:
+
+- `BackpressureBlock`: wait for queue admission; this is the default and keeps
+  V5.20 behavior.
+- `BackpressureReject`: return `ErrWritePipelineFull` when the queue is full.
+- `BackpressureTimeout`: wait according to the caller's context and return its
+  error if admission cannot complete before the deadline.
+
+### Compatibility guarantees
+
+V5.21 does not introduce operation coalescing or reordering. Submission order,
+`Flush` barriers, `Close` drain behavior, Future completion, input-buffer
+copying, and batch-level transaction atomicity remain unchanged.

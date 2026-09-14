@@ -15,6 +15,18 @@ import (
 // The pipeline intentionally batches requests only at the transaction level.
 // It does not coalesce, reorder, or otherwise rewrite operations. Requests
 // therefore retain their submission order and are executed in that order.
+type BackpressurePolicy int
+
+const (
+	// BackpressureBlock waits until queue space is available.
+	BackpressureBlock BackpressurePolicy = iota
+	// BackpressureReject returns ErrWritePipelineFull when the queue is full.
+	BackpressureReject
+	// BackpressureTimeout waits according to the caller context and returns its
+	// error if admission does not complete before the deadline.
+	BackpressureTimeout
+)
+
 type WritePipelineOptions struct {
 	// MaxBatchSize is the maximum number of write requests committed by one
 	// bbolt transaction. It must be greater than zero.
@@ -29,6 +41,14 @@ type WritePipelineOptions struct {
 	// QueueSize is the bounded number of requests waiting to be processed.
 	// It must be greater than zero.
 	QueueSize int
+
+	// Backpressure controls what happens when the bounded queue is full.
+	// Block is the backwards-compatible default.
+	Backpressure BackpressurePolicy
+
+	// BatchPolicy optionally chooses the target batch size dynamically. When
+	// nil, MaxBatchSize is used for every batch.
+	BatchPolicy BatchPolicy
 }
 
 // DefaultWritePipelineOptions is deliberately conservative for a durable
@@ -39,6 +59,7 @@ func DefaultWritePipelineOptions() WritePipelineOptions {
 		MaxBatchSize: 100,
 		MaxWait:      5 * time.Millisecond,
 		QueueSize:    1024,
+		Backpressure: BackpressureBlock,
 	}
 }
 
@@ -52,6 +73,9 @@ func normalizeWritePipelineOptions(in WritePipelineOptions) (WritePipelineOption
 	if in.MaxWait < 0 {
 		return WritePipelineOptions{}, errors.New("udb: write pipeline MaxWait must be >= 0")
 	}
+	if in.Backpressure < BackpressureBlock || in.Backpressure > BackpressureTimeout {
+		return WritePipelineOptions{}, errors.New("udb: invalid write pipeline backpressure policy")
+	}
 	return in, nil
 }
 
@@ -63,6 +87,17 @@ type PipelineStats struct {
 	Transactions    uint64
 	RequestsInQueue int
 	QueueCapacity   int
+
+	TotalItems         uint64
+	TotalCommitLatency time.Duration
+	LastCommitLatency  time.Duration
+	MinCommitLatency   time.Duration
+	MaxCommitLatency   time.Duration
+	CurrentBatchSize   uint64
+	Batches            uint64
+	AvgBatchSize       float64
+	AvgCommitLatency   time.Duration
+	Throughput         float64
 }
 
 type pipelineOp uint8
@@ -143,10 +178,19 @@ type WritePipeline struct {
 	writerDone chan struct{}
 	closeErr   error
 
-	submitted    atomic.Uint64
-	committed    atomic.Uint64
-	failed       atomic.Uint64
-	transactions atomic.Uint64
+	submitted       atomic.Uint64
+	committed       atomic.Uint64
+	failed          atomic.Uint64
+	transactions    atomic.Uint64
+	batches         atomic.Uint64
+	totalItems      atomic.Uint64
+	commitNanos     atomic.Uint64
+	lastNanos       atomic.Int64
+	minNanos        atomic.Uint64
+	maxNanos        atomic.Uint64
+	currentBatch    atomic.Uint64
+	lastBatchTarget atomic.Uint64
+	startNanos      int64
 }
 
 // NewWritePipeline starts one dedicated writer goroutine.
@@ -170,6 +214,7 @@ func (db *DB) NewWritePipeline(opts WritePipelineOptions) (*WritePipeline, error
 		opts:       norm,
 		q:          make(chan *pipelineRequest, norm.QueueSize),
 		writerDone: make(chan struct{}),
+		startNanos: time.Now().UnixNano(),
 	}
 	go p.run()
 	return p, nil
@@ -188,13 +233,30 @@ func (p *WritePipeline) Stats() PipelineStats {
 	if p == nil {
 		return PipelineStats{}
 	}
+	transactions := p.transactions.Load()
+	items := p.totalItems.Load()
+	totalNanos := p.commitNanos.Load()
+	avgBatch := 0.0
+	if transactions > 0 {
+		avgBatch = float64(items) / float64(transactions)
+	}
+	avgLatency := time.Duration(0)
+	if transactions > 0 {
+		avgLatency = time.Duration(totalNanos / transactions)
+	}
+	throughput := 0.0
+	elapsed := time.Since(time.Unix(0, p.startNanos)).Seconds()
+	if elapsed > 0 {
+		throughput = float64(p.committed.Load()) / elapsed
+	}
+	min := p.minNanos.Load()
 	return PipelineStats{
-		Submitted:       p.submitted.Load(),
-		Committed:       p.committed.Load(),
-		Failed:          p.failed.Load(),
-		Transactions:    p.transactions.Load(),
-		RequestsInQueue: len(p.q),
-		QueueCapacity:   cap(p.q),
+		Submitted: p.submitted.Load(), Committed: p.committed.Load(), Failed: p.failed.Load(),
+		Transactions: transactions, RequestsInQueue: len(p.q), QueueCapacity: cap(p.q),
+		TotalItems: items, TotalCommitLatency: time.Duration(totalNanos),
+		LastCommitLatency: time.Duration(p.lastNanos.Load()), MinCommitLatency: time.Duration(min),
+		MaxCommitLatency: time.Duration(p.maxNanos.Load()), CurrentBatchSize: p.currentBatch.Load(),
+		Batches: p.batches.Load(), AvgBatchSize: avgBatch, AvgCommitLatency: avgLatency, Throughput: throughput,
 	}
 }
 
@@ -219,18 +281,26 @@ func (p *WritePipeline) submit(ctx context.Context, req *pipelineRequest) error 
 
 	p.seq++
 	req.seq = p.seq
-	select {
-	case p.q <- req:
-		// Flush is an ordering barrier, not a write request. Keep it out of
-		// the request counters so Submitted/Committed/Failed describe actual
-		// database mutations only.
-		if req.op != pipelineFlush {
-			p.submitted.Add(1)
+	if p.opts.Backpressure == BackpressureReject {
+		select {
+		case p.q <- req:
+		default:
+			return ErrWritePipelineFull
 		}
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	} else {
+		select {
+		case p.q <- req:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
+	// Flush is an ordering barrier, not a write request. Keep it out of
+	// the request counters so Submitted/Committed/Failed describe actual
+	// database mutations only.
+	if req.op != pipelineFlush {
+		p.submitted.Add(1)
+	}
+	return nil
 }
 
 func (p *WritePipeline) submitAsync(ctx context.Context, req *pipelineRequest) (*WriteFuture, error) {
@@ -429,7 +499,23 @@ func (p *WritePipeline) run() {
 			continue
 		}
 
-		batch := make([]*pipelineRequest, 0, p.opts.MaxBatchSize)
+		target := p.opts.MaxBatchSize
+		if p.opts.BatchPolicy != nil {
+			current := int(p.lastBatchTarget.Load())
+			if current < 1 {
+				current = 1
+			}
+			target = p.opts.BatchPolicy.NextBatchSize(len(p.q), cap(p.q), current, p.Stats())
+			if target < 1 {
+				target = 1
+			}
+			if target > p.opts.MaxBatchSize {
+				target = p.opts.MaxBatchSize
+			}
+		}
+		p.lastBatchTarget.Store(uint64(target))
+		p.currentBatch.Store(1)
+		batch := make([]*pipelineRequest, 0, target)
 		batch = append(batch, first)
 
 		var timer *time.Timer
@@ -440,7 +526,7 @@ func (p *WritePipeline) run() {
 		}
 
 		collecting := true
-		for collecting && len(batch) < p.opts.MaxBatchSize {
+		for collecting && len(batch) < target {
 			if p.opts.MaxWait <= 0 {
 				select {
 				case req, ok := <-p.q:
@@ -456,6 +542,7 @@ func (p *WritePipeline) run() {
 						continue
 					}
 					batch = append(batch, req)
+					p.currentBatch.Store(uint64(len(batch)))
 				default:
 					collecting = false
 				}
@@ -476,6 +563,7 @@ func (p *WritePipeline) run() {
 					continue
 				}
 				batch = append(batch, req)
+				p.currentBatch.Store(uint64(len(batch)))
 			case <-timerC:
 				collecting = false
 			}
@@ -499,6 +587,7 @@ func (p *WritePipeline) executeBatch(batch []*pipelineRequest) {
 		return
 	}
 	p.transactions.Add(1)
+	started := time.Now()
 	err := p.db.Update(func(tx *Tx) error {
 		for _, req := range batch {
 			var err error
@@ -521,6 +610,30 @@ func (p *WritePipeline) executeBatch(batch []*pipelineRequest) {
 		return nil
 	})
 
+	latency := time.Since(started)
+	p.commitNanos.Add(uint64(latency))
+	p.lastNanos.Store(int64(latency))
+	p.totalItems.Add(uint64(len(batch)))
+	p.batches.Add(1)
+	for {
+		old := p.minNanos.Load()
+		if old != 0 && old <= uint64(latency) {
+			break
+		}
+		if p.minNanos.CompareAndSwap(old, uint64(latency)) {
+			break
+		}
+	}
+	for {
+		old := p.maxNanos.Load()
+		if old >= uint64(latency) {
+			break
+		}
+		if p.maxNanos.CompareAndSwap(old, uint64(latency)) {
+			break
+		}
+	}
+	p.currentBatch.Store(0)
 	if err != nil {
 		p.failed.Add(uint64(len(batch)))
 		for _, req := range batch {

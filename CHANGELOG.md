@@ -34,3 +34,17 @@
 - Preserved batch-level bbolt transaction atomicity; a failed transaction reports the same error to every request in that batch.
 - Added V5.20 async correctness and performance benchmarks.
 - No operation coalescing or reordering was introduced.
+
+## V5.21
+
+### Adaptive Write Pipeline and Observability
+
+- Added `PipelineStats` latency, batch, throughput and queue metrics.
+- Added `BatchPolicy` with `FixedBatchPolicy` and `AdaptiveBatchPolicy`.
+- Added adaptive batching based on queue pressure and observed commit latency.
+- Added `BackpressurePolicy` with block, reject and context-driven timeout modes.
+- Added `ErrWritePipelineFull` for explicit queue rejection.
+- Added V5.21 metrics, policy and backpressure tests.
+- Added V5.21 adaptive and parallel-producer benchmarks.
+- Preserved V5.20 ordering, Flush, Close, Future, input-copy and transaction-atomicity semantics.
+- No changes to recovery, integrity, ZSet storage format or default durability.

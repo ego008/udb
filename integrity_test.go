@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-func openV57TestDB(t *testing.T) *DB {
+func openV57TestDB(t testing.TB) *DB {
 	t.Helper()
 	db, err := Open(t.TempDir() + "/test.db")
 	if err != nil {
