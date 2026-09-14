@@ -1,27 +1,29 @@
 # Changelog
 
-## V5.5
+## V5.6
 
-### Fault injection and recovery
+### Crash consistency and recovery
+
+- Added durability-aware recovery journal persistence: write, file sync, atomic rename, and Unix directory sync.
+- Added explicit synchronization of the compacted database before replacement.
+- Added directory synchronization around destructive compaction renames/removals on Unix.
+- Startup recovery now tolerates corrupt or partially written journals when the formal database is already valid.
+- Added fallback artifact scanning when the journal is missing/unusable and the formal database is unavailable.
+- Recovery candidates are always validated with a complete bbolt integrity check before promotion.
+- Added cross-platform recovery handling for an existing invalid formal file when rename cannot overwrite it directly.
+- Added process-death tests for all eight compaction fault boundaries, with and without backups.
+- Added tests for corrupt journals, journal-independent temp recovery, repeated recovery idempotence, and atomic journal replacement.
+
+## V5.5.1
+
+- Fixed Go compile error caused by comparing `MaintenanceConfig` as a whole after adding the function-valued `CompactFaultInjector` field.
+- Replaced whole-struct zero comparison with an explicit zero-value predicate that safely handles the function field.
+
+## V5.5
 
 - Added deterministic `CompactFaultPoint` / `CompactFaultInjector` hooks for reliability testing.
 - Added a recovery journal for `CompactAndReplace` destructive stages.
 - Added startup recovery for interrupted compact-and-replace operations.
-- Recovery prefers a valid formal database, then a valid compacted temp file, then a valid backup.
 - Added rollback handling for failures before/after backup, replacement, reopen, and post-check stages.
-- Temporary compact files and recovery journals are cleaned after successful recovery.
-- `CompactTo` now explicitly rejects an existing directory destination instead of relying on bbolt/OS behavior.
-- Added V5.5 fault-injection and startup-recovery tests covering Hash, ZSet, `Check`, `CheckZSet`, and post-failure writes.
-
-## V5.5
-
-- Added logical snapshot compaction tests.
-- Added repeated compact idempotence tests.
-- Added backup/rollback validation.
-- Added ZSet corruption detection and repair tests.
-- Added mixed Hash/ZSet pressure tests and Compact/Close lifecycle race tests.
-- Added close/reopen persistence tests.
-
-## V5.5.1
-- Fixed Go compile error caused by comparing `MaintenanceConfig` as a whole after adding the function-valued `CompactFaultInjector` field.
-- Replaced whole-struct zero comparison with an explicit zero-value predicate that safely handles the function field.
+- Added logical snapshot, backup/rollback, ZSet repair, mixed pressure, lifecycle-race, and close/reopen persistence tests.
+- `CompactTo` now explicitly rejects an existing directory destination.

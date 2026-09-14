@@ -1,20 +1,22 @@
-# UDB V5.5
+# UDB V5.6
 
 UDB is a small Go embedded database wrapper built on `go.etcd.io/bbolt`, exposing Hash and ZSet primitives while keeping transaction ownership inside UDB.
 
-## V5.5 focus
+## V5.6 focus
 
-V5.5 adds **fault injection and crash-recovery protection** around compaction:
+V5.6 upgrades compaction recovery from **process-alive rollback** to a **crash-consistency protocol**:
 
-- managed lifecycle admission/drain for `View`, `Update`, `Close`, and `CompactAndReplace`;
-- deterministic compaction fault points for tests;
-- a recovery journal written before destructive replacement stages;
-- automatic rollback while the process is alive;
-- conservative startup recovery after an interrupted replacement;
-- validation of formal DB, compacted temp DB, and backup DB before promotion;
-- cleanup of temporary files and recovery journals after successful recovery;
-- explicit rejection of a directory passed to `CompactTo`;
-- full logical Hash/ZSet snapshot verification after injected failures.
+- recovery journal uses write + `fsync` + atomic rename + directory synchronization on Unix;
+- compacted database is explicitly synchronized before replacement;
+- every destructive rename/remove boundary is followed by directory synchronization on Unix;
+- startup recovery tolerates a partially written/corrupt journal when the formal database is already valid;
+- if the formal database is missing or invalid, recovery can scan validated compact-temp and backup artifacts when the journal is unavailable or unusable;
+- recovery never promotes an artifact unless a complete bbolt integrity check succeeds;
+- existing invalid formal files are removed before promotion, which also makes replacement recovery work on platforms whose rename does not overwrite an existing file;
+- process-death tests exercise every compaction boundary with both backup enabled and disabled;
+- repeated startup recovery is tested for idempotence.
+
+The design remains intentionally conservative: **a valid formal database always wins; otherwise only a fully checked recovery candidate may be promoted**.
 
 ## Fault injection
 
@@ -44,14 +46,25 @@ _, _, err := db.CompactAndReplace(cfg)
 
 ## Startup recovery policy
 
-When `<db>.compact-recovery.json` exists at startup:
+At startup, UDB first checks whether the formal database is already valid.
 
-1. If the formal database is valid, keep it and remove stale recovery artifacts.
-2. Otherwise, if the compacted temp file is valid, promote it.
-3. Otherwise, if the backup is valid, restore it.
-4. If none is valid, opening fails rather than guessing or promoting a corrupt file.
+1. **Formal DB valid** → keep it; stale/corrupt recovery journal cannot block startup.
+2. **Formal DB invalid/missing + valid journal** → prefer the journal's valid compact temp, then its valid backup.
+3. **Journal missing/corrupt/partial** → scan only compaction/backup filename patterns and consider candidates in newest-first order.
+4. **Every candidate is integrity-checked** before promotion.
+5. **No valid candidate** → opening fails rather than guessing.
 
-This policy intentionally favors **data integrity over availability**.
+This policy favors **data integrity over availability**.
+
+## Durability boundary
+
+V5.6 distinguishes three levels:
+
+- normal bbolt transaction durability;
+- UDB compaction state durability, where journal and directory-entry changes are explicitly synchronized;
+- actual hardware/power-loss durability, which still depends on the operating system, filesystem, storage device, and their guarantees.
+
+The process-death tests therefore validate recovery semantics after `os.Exit`, while not claiming to emulate a physical power cut.
 
 ## Testing
 
@@ -65,6 +78,12 @@ Race detector:
 
 ```bash
 go test -race ./...
+```
+
+Targeted V5.6 crash/recovery tests:
+
+```bash
+go test -run 'TestV56ProcessDeathAtCompactionBoundaries|TestV56CorruptJournalDoesNotBlockValidDB|TestV56RecoverWithoutUsableJournalFromNewestTemp|TestV56RepeatedRecoveryIsIdempotent' -count=1
 ```
 
 The pressure tests that deliberately use `NoSync=true` test concurrency/index consistency rather than crash durability. Persistence/recovery tests use the normal durable default.

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -226,6 +227,10 @@ func (db *DB) compactTo(dstPath string, cfg MaintenanceConfig, st DBStats, src *
 		_ = os.Remove(dstPath)
 		return CompactResult{}, err
 	}
+	if err := syncFile(dstPath); err != nil {
+		_ = os.Remove(dstPath)
+		return CompactResult{}, fmt.Errorf("udb: sync compacted db: %w", err)
+	}
 	if err := injectCompactFault(cfg, FaultAfterCompact); err != nil {
 		_ = os.Remove(dstPath)
 		return CompactResult{}, err
@@ -339,9 +344,15 @@ func (db *DB) CompactAndReplaceContext(ctx context.Context, cfg MaintenanceConfi
 		if err := writeRecoveryJournal(journalPath, journal); err != nil {
 			return db.rollbackCompactFailure(path, tmp, backup, true, fmt.Errorf("udb: update recovery journal: %w", err))
 		}
+		if err := syncDir(filepath.Dir(path)); err != nil {
+			return db.rollbackCompactFailure(path, tmp, backup, true, fmt.Errorf("udb: sync backup rename: %w", err))
+		}
 	} else {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return db.rollbackCompactFailure(path, tmp, "", false, fmt.Errorf("udb: remove original: %w", err))
+		}
+		if err := syncDir(filepath.Dir(path)); err != nil {
+			return db.rollbackCompactFailure(path, tmp, "", false, fmt.Errorf("udb: sync original removal: %w", err))
 		}
 	}
 	if err := injectCompactFault(cfg, FaultAfterBackup); err != nil {
@@ -353,6 +364,9 @@ func (db *DB) CompactAndReplaceContext(ctx context.Context, cfg MaintenanceConfi
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		return db.rollbackCompactFailure(path, tmp, backup, cfg.KeepBackup, fmt.Errorf("udb: install compacted db: %w", err))
+	}
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return db.rollbackCompactFailure(path, "", backup, cfg.KeepBackup, fmt.Errorf("udb: sync compacted db rename: %w", err))
 	}
 	journal.Stage = "replaced"
 	if err := writeRecoveryJournal(journalPath, journal); err != nil {
@@ -415,12 +429,15 @@ func (db *DB) rollbackCompactFailure(path, tmp, backup string, keepBackup bool, 
 		}
 		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 			if err := os.Rename(backup, path); err == nil {
+				_ = syncDir(filepath.Dir(path))
 				backup = ""
 			}
 		}
 	}
 	if !validBoltFile(path, db.opts) && tmp != "" && validBoltFile(tmp, db.opts) {
-		_ = os.Rename(tmp, path)
+		if err := os.Rename(tmp, path); err == nil {
+			_ = syncDir(filepath.Dir(path))
+		}
 	}
 	if validBoltFile(path, db.opts) {
 		_ = db.reopenLocked(path)
