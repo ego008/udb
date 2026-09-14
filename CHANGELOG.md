@@ -1,12 +1,42 @@
 # Changelog
 
-## V5.6.2
+## V5.7.1
 
-- Strengthened crash-recovery fallback when the recovery journal is missing or corrupt.
-- A valid formal database remains authoritative whenever it exists.
-- Journal-less recovery now refuses to guess when both a valid compact temporary file and a valid backup exist; this prevents silent rollback/data loss.
-- Added recovery state-matrix tests for ambiguous artifacts, corrupt journals, single valid artifact recovery, and formal-database precedence.
-- Preserved Hash/ZSet logical snapshot and bbolt integrity checks across recovery paths.
+### Integrity & self-healing fix
+
+- Fixed a Go compile error in `integrity.go` caused by using the wrong `bbolt.Tx.ForEach` callback signature.
+- Updated top-level bucket scans to use `func(name []byte, b *bbolt.Bucket) error`, matching bbolt v1.5.0.
+- Reused the bucket returned by `ForEach` instead of performing redundant bucket lookups.
+- Preserved all V5.7 integrity, repair, and compaction verification behavior.
+
+## V5.7
+
+### Integrity & self-healing
+
+- Added `CheckIntegrity()` for read-only logical consistency checking of UDB Hash/ZSet structures.
+- Added detailed ZSet checks for missing, orphaned, malformed, and mismatched secondary indexes.
+- Added detection of an orphan ZSet key-index bucket without a score bucket.
+- Added `RepairIntegrity()` with deterministic secondary-index rebuild from the primary score map.
+- Invalid primary ZSet scores are preserved by default; destructive cleanup requires `RepairOptions{DropInvalidScores: true}`.
+- Added integrity checks before/after compaction through `MaintenanceConfig.IntegrityBeforeCompact` and `IntegrityAfterCompact`.
+- Enabled post-compaction integrity verification by default.
+- Added V5.7 integrity regression tests for healthy data, missing/orphan indexes, mismatched indexes, invalid scores, and orphan buckets.
+
+## V5.6.3
+
+### Recovery safety
+
+- Fixed journal-less recovery artifact discovery to recognize both `.compact.<suffix>` and `.compact-<suffix>` temporary artifact names.
+- Tightened journal-less recovery: if more than one fully valid recovery artifact exists, recovery now fails closed instead of selecting by mtime.
+- Preserved the rule that a valid formal database always wins over stale or corrupt recovery artifacts.
+- Added recovery state-matrix coverage for ambiguous artifacts, corrupt journals, single valid artifact recovery, and formal-database precedence.
+
+## V5.6.1
+
+### Crash consistency and recovery
+
+- Fixed startup recovery for a brand-new database with no formal DB, journal, or recovery artifacts.
+- Startup now treats that state as a normal fresh-open case instead of reporting a recovery failure.
 
 ## V5.6
 
@@ -16,10 +46,10 @@
 - Added explicit synchronization of the compacted database before replacement.
 - Added directory synchronization around destructive compaction renames/removals on Unix.
 - Startup recovery now tolerates corrupt or partially written journals when the formal database is already valid.
-- Added fallback artifact scanning when the journal is missing/unusable and the formal database is unavailable.
+- Added fallback artifact scanning when the journal is missing or unusable and the formal database is unavailable.
 - Recovery candidates are always validated with a complete bbolt integrity check before promotion.
 - Added cross-platform recovery handling for an existing invalid formal file when rename cannot overwrite it directly.
-- Added process-death tests for all eight compaction fault boundaries, with and without backups.
+- Added process-death tests for compaction fault boundaries, with and without backups.
 - Added tests for corrupt journals, journal-independent temp recovery, repeated recovery idempotence, and atomic journal replacement.
 
 ## V5.5.1
@@ -35,9 +65,3 @@
 - Added rollback handling for failures before/after backup, replacement, reopen, and post-check stages.
 - Added logical snapshot, backup/rollback, ZSet repair, mixed pressure, lifecycle-race, and close/reopen persistence tests.
 - `CompactTo` now explicitly rejects an existing directory destination.
-
-## V5.6.3
-
-- Fixed journal-less recovery artifact discovery to recognize both `.compact.<suffix>` and `.compact-<suffix>` temporary artifact names.
-- Tightened journal-less recovery: if more than one fully valid recovery artifact exists, recovery now fails closed instead of selecting by mtime.
-- Preserved the rule that a valid formal database always wins over stale/corrupt recovery artifacts.

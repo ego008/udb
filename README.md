@@ -112,3 +112,23 @@ All source files import it as:
 ```go
 import bolt "go.etcd.io/bbolt"
 ```
+
+## Integrity & self-healing (V5.7)
+
+UDB V5.7.1 separates structural database validation from logical data-structure validation:
+
+- `Check()` validates the underlying bbolt structure.
+- `CheckIntegrity()` validates UDB Hash/ZSet logical consistency without modifying data.
+- `RepairIntegrity()` repairs ZSet secondary indexes from the primary `member -> score` map.
+
+A repair is deliberately conservative. Malformed primary score values are reported and cause repair to fail unless the caller explicitly enables:
+
+```go
+report, err := db.RepairIntegrity(udb.RepairOptions{
+    DropInvalidScores: true,
+})
+```
+
+For compaction, `MaintenanceConfig.IntegrityAfterCompact` is enabled by default. `IntegrityBeforeCompact` can also be enabled when a full logical validation before compaction is desired.
+
+The design principle is: **detect automatically, repair deterministically, and never silently discard application data.**

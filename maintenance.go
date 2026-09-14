@@ -30,26 +30,28 @@ const (
 type CompactFaultInjector func(CompactFaultPoint) error
 
 type MaintenanceConfig struct {
-	Enabled            bool
-	Interval           time.Duration
-	MinDBSize          int64
-	FreeRatio          float64
-	PendingRatio       float64
-	TxMaxSize          int
-	CheckBeforeCompact bool
-	CheckAfterCompact  bool
-	KeepBackup         bool
-	BackupSuffix       string
-	CompactCooldown    time.Duration
-	MaxFailures        int
-	FaultInjector      CompactFaultInjector
+	Enabled                bool
+	Interval               time.Duration
+	MinDBSize              int64
+	FreeRatio              float64
+	PendingRatio           float64
+	TxMaxSize              int
+	CheckBeforeCompact     bool
+	CheckAfterCompact      bool
+	IntegrityBeforeCompact bool
+	IntegrityAfterCompact  bool
+	KeepBackup             bool
+	BackupSuffix           string
+	CompactCooldown        time.Duration
+	MaxFailures            int
+	FaultInjector          CompactFaultInjector
 }
 
 func DefaultMaintenanceConfig() MaintenanceConfig {
 	return MaintenanceConfig{
 		Enabled: true, Interval: 30 * time.Minute, MinDBSize: 512 << 20,
 		FreeRatio: 0.30, PendingRatio: 0.10, TxMaxSize: 64 << 10,
-		CheckAfterCompact: true, KeepBackup: true,
+		CheckAfterCompact: true, IntegrityAfterCompact: true, KeepBackup: true,
 		BackupSuffix: ".backup-20060102-150405.000000000", CompactCooldown: 6 * time.Hour,
 		MaxFailures: 3,
 	}
@@ -204,6 +206,11 @@ func (db *DB) compactTo(dstPath string, cfg MaintenanceConfig, st DBStats, src *
 			return CompactResult{}, fmt.Errorf("udb: source check failed: %w", err)
 		}
 	}
+	if cfg.IntegrityBeforeCompact {
+		if err := checkIntegrityBoltDB(src); err != nil {
+			return CompactResult{}, fmt.Errorf("udb: source integrity check failed: %w", err)
+		}
+	}
 	if err := ensureSameDir(dstPath); err != nil {
 		return CompactResult{}, err
 	}
@@ -239,6 +246,12 @@ func (db *DB) compactTo(dstPath string, cfg MaintenanceConfig, st DBStats, src *
 		if err = checkBoltFile(dstPath, db.opts.boltOptions()); err != nil {
 			_ = os.Remove(dstPath)
 			return CompactResult{}, fmt.Errorf("udb: compacted db check failed: %w", err)
+		}
+	}
+	if cfg.IntegrityAfterCompact {
+		if err = checkIntegrityBoltFile(dstPath, db.opts.boltOptions()); err != nil {
+			_ = os.Remove(dstPath)
+			return CompactResult{}, fmt.Errorf("udb: compacted db integrity check failed: %w", err)
 		}
 	}
 	after, err := os.Stat(dstPath)
@@ -298,6 +311,11 @@ func (db *DB) CompactAndReplaceContext(ctx context.Context, cfg MaintenanceConfi
 	if cfg.CheckBeforeCompact {
 		if err := checkBoltDB(src); err != nil {
 			return CompactResult{}, "", fmt.Errorf("udb: source check failed: %w", err)
+		}
+	}
+	if cfg.IntegrityBeforeCompact {
+		if err := checkIntegrityBoltDB(src); err != nil {
+			return CompactResult{}, "", fmt.Errorf("udb: source integrity check failed: %w", err)
 		}
 	}
 
@@ -393,6 +411,11 @@ func (db *DB) CompactAndReplaceContext(ctx context.Context, cfg MaintenanceConfi
 	if cfg.CheckAfterCompact {
 		if err := checkBoltDB(db.lifecycle.currentDB(db)); err != nil {
 			return db.rollbackCompactFailure(path, "", backup, cfg.KeepBackup, fmt.Errorf("udb: installed compacted db check failed: %w", err))
+		}
+	}
+	if cfg.IntegrityAfterCompact {
+		if err := checkIntegrityBoltDB(db.lifecycle.currentDB(db)); err != nil {
+			return db.rollbackCompactFailure(path, "", backup, cfg.KeepBackup, fmt.Errorf("udb: installed compacted db integrity check failed: %w", err))
 		}
 	}
 	if err := injectCompactFault(cfg, FaultAfterCheck); err != nil {

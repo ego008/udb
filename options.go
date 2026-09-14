@@ -92,6 +92,8 @@ func isZeroMaintenanceConfig(c MaintenanceConfig) bool {
 		c.TxMaxSize == 0 &&
 		!c.CheckBeforeCompact &&
 		!c.CheckAfterCompact &&
+		!c.IntegrityBeforeCompact &&
+		!c.IntegrityAfterCompact &&
 		!c.KeepBackup &&
 		c.BackupSuffix == "" &&
 		c.CompactCooldown == 0 &&
