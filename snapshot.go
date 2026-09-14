@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -45,9 +46,12 @@ func (db *DB) Snapshot() (*Snapshot, error) {
 		hashes: make(map[string]map[string][]byte),
 		zsets:  make(map[string]map[string]uint64),
 	}
-
+	started := time.Now()
+	var snapshotBytes uint64
 	if err := db.View(func(tx *Tx) error {
-		return s.capture(tx)
+		var err error
+		snapshotBytes, err = s.capture(tx)
+		return err
 	}); err != nil {
 		return nil, err
 	}
@@ -55,16 +59,18 @@ func (db *DB) Snapshot() (*Snapshot, error) {
 	if db.metrics != nil {
 		db.metrics.snapOpen.Add(1)
 		db.metrics.snapActive.Add(1)
+		db.recordSnapshotMetrics(time.Since(started), snapshotBytes)
 	}
 	return s, nil
 }
 
-func (s *Snapshot) capture(tx *Tx) error {
+func (s *Snapshot) capture(tx *Tx) (uint64, error) {
 	if tx == nil || tx.inner == nil {
-		return ErrDatabaseClosed
+		return 0, ErrDatabaseClosed
 	}
+	var totalBytes uint64
 
-	return tx.inner.ForEach(func(name []byte, top *bolt.Bucket) error {
+	err := tx.inner.ForEach(func(name []byte, top *bolt.Bucket) error {
 		// UDB stores Hash/ZSet data in top-level buckets.
 		// ForEach supplies the bucket directly as the second argument.
 		if top == nil {
@@ -80,6 +86,7 @@ func (s *Snapshot) capture(tx *Tx) error {
 					return nil
 				}
 				m[string(k)] = cloneBytes(v)
+				totalBytes += uint64(len(k) + len(v))
 				return nil
 			}); err != nil {
 				return err
@@ -101,6 +108,7 @@ func (s *Snapshot) capture(tx *Tx) error {
 					return err
 				}
 				m[string(k)] = score
+				totalBytes += uint64(len(k) + uint64EncodedLen)
 				return nil
 			}); err != nil {
 				return err
@@ -109,6 +117,10 @@ func (s *Snapshot) capture(tx *Tx) error {
 		}
 		return nil
 	})
+	if err != nil {
+		return totalBytes, err
+	}
+	return totalBytes, nil
 }
 
 // Close releases the snapshot's in-memory data. Close is idempotent.

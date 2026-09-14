@@ -444,10 +444,12 @@ defer snap.Close()
 r := snap.HGet("user", []byte("name"))
 ```
 
-A Snapshot owns one bbolt read transaction and therefore observes one consistent
-read view until `Close`. Snapshot methods are safe for concurrent readers. `Close`
-is idempotent. Because the snapshot remains an admitted lifecycle operation, a
-forgotten snapshot can prevent database Close/compaction from draining.
+A Snapshot materializes the public Hash/ZSet state during one managed read
+transaction and releases that transaction before returning. Snapshot methods are
+safe for concurrent readers and `Close` is idempotent. A long-lived Snapshot does
+not occupy a source bbolt read transaction and therefore cannot block source
+writes, mmap growth, compaction, or Close. The trade-off is memory proportional to
+the logical snapshot size.
 
 ### Database metrics
 
@@ -478,3 +480,28 @@ Snapshot 仍保持创建瞬间的一致性视图，Snapshot.Close 幂等，并�
 ### V5.22.2 Snapshot deadlock fix
 
 Snapshot now materializes the public Hash/ZSet state into memory while one managed read transaction is active. The source transaction is released before Snapshot returns. This avoids bbolt mmap/nested-transaction deadlocks while preserving point-in-time reads. The trade-off is memory usage proportional to the logical snapshot size.
+
+### V5.23 — Unified write core and deeper observability
+
+V5.23 unifies the internal mutation engine used by `Batch`, `WritePipeline`, and the
+public batch helpers (`HSetBatch`, `ZSetBatch`, `HDelBatch`, `ZDelBatch`). All paths
+now share the same ordered Hash/ZSet mutation semantics and per-transaction bucket
+cache. This reduces implementation drift while preserving atomic rollback.
+
+`PipelineStats` now also reports queue-wait latency:
+
+- `TotalQueueWaitLatency`
+- `LastQueueWaitLatency`
+- `MaxQueueWaitLatency`
+- `AvgQueueWaitLatency`
+
+Database metrics now include logical Snapshot size and capture duration:
+
+- `SnapshotBytes` / `SnapshotMaxBytes`
+- `SnapshotDuration`
+- `AvgSnapshotBytes`
+- `AvgSnapshotDuration`
+
+These metrics describe the cost of creating an in-memory logical Snapshot; they do
+not represent the physical bbolt file size. `ResetMetrics` resets these cumulative
+Snapshot metrics as well.

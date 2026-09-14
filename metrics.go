@@ -9,17 +9,22 @@ import (
 // measures transaction-level activity rather than individual HSet/HGet calls,
 // because those calls are implemented on top of View/Update transactions.
 type DBMetrics struct {
-	ViewTransactions   uint64
-	UpdateTransactions uint64
-	ViewErrors         uint64
-	UpdateErrors       uint64
-	ViewLatency        time.Duration
-	UpdateLatency      time.Duration
-	SnapshotsOpened    uint64
-	SnapshotsClosed    uint64
-	SnapshotsActive    uint64
-	BatchCommits       uint64
-	BatchItems         uint64
+	ViewTransactions    uint64
+	UpdateTransactions  uint64
+	ViewErrors          uint64
+	UpdateErrors        uint64
+	ViewLatency         time.Duration
+	UpdateLatency       time.Duration
+	SnapshotsOpened     uint64
+	SnapshotsClosed     uint64
+	SnapshotsActive     uint64
+	BatchCommits        uint64
+	BatchItems          uint64
+	SnapshotBytes       uint64
+	SnapshotDuration    time.Duration
+	SnapshotMaxBytes    uint64
+	AvgSnapshotBytes    float64
+	AvgSnapshotDuration time.Duration
 }
 
 type dbMetricsState struct {
@@ -29,16 +34,32 @@ type dbMetricsState struct {
 	snapOpen, snapClose      atomic.Uint64
 	snapActive               atomic.Int64
 	batchCommits, batchItems atomic.Uint64
+	snapBytes, snapNanos     atomic.Uint64
+	snapMaxBytes             atomic.Uint64
 }
 
 func (m *dbMetricsState) snapshot() DBMetrics {
+	viewNanos := m.viewNanos.Load()
+	updateNanos := m.updateNanos.Load()
+	snapOpen := m.snapOpen.Load()
+	snapBytes := m.snapBytes.Load()
+	snapNanos := m.snapNanos.Load()
+	avgSnapBytes := 0.0
+	avgSnapNanos := time.Duration(0)
+	if snapOpen > 0 {
+		avgSnapBytes = float64(snapBytes) / float64(snapOpen)
+		avgSnapNanos = time.Duration(snapNanos / snapOpen)
+	}
 	return DBMetrics{
 		ViewTransactions: m.viewTx.Load(), UpdateTransactions: m.updateTx.Load(),
 		ViewErrors: m.viewErr.Load(), UpdateErrors: m.updateErr.Load(),
-		ViewLatency: time.Duration(m.viewNanos.Load()), UpdateLatency: time.Duration(m.updateNanos.Load()),
-		SnapshotsOpened: m.snapOpen.Load(), SnapshotsClosed: m.snapClose.Load(),
+		ViewLatency: time.Duration(viewNanos), UpdateLatency: time.Duration(updateNanos),
+		SnapshotsOpened: snapOpen, SnapshotsClosed: m.snapClose.Load(),
 		SnapshotsActive: uint64(maxInt64(m.snapActive.Load(), 0)),
 		BatchCommits:    m.batchCommits.Load(), BatchItems: m.batchItems.Load(),
+		SnapshotBytes: snapBytes, SnapshotDuration: time.Duration(snapNanos),
+		SnapshotMaxBytes: m.snapMaxBytes.Load(), AvgSnapshotBytes: avgSnapBytes,
+		AvgSnapshotDuration: avgSnapNanos,
 	}
 }
 
@@ -95,5 +116,22 @@ func (db *DB) recordUpdate(start time.Time, err error) {
 	db.metrics.updateNanos.Add(uint64(time.Since(start)))
 	if err != nil {
 		db.metrics.updateErr.Add(1)
+	}
+}
+
+func (db *DB) recordSnapshotMetrics(duration time.Duration, bytes uint64) {
+	if db == nil || db.metrics == nil {
+		return
+	}
+	db.metrics.snapBytes.Add(bytes)
+	db.metrics.snapNanos.Add(uint64(duration))
+	for {
+		old := db.metrics.snapMaxBytes.Load()
+		if old >= bytes {
+			return
+		}
+		if db.metrics.snapMaxBytes.CompareAndSwap(old, bytes) {
+			return
+		}
 	}
 }

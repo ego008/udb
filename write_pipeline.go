@@ -88,16 +88,20 @@ type PipelineStats struct {
 	RequestsInQueue int
 	QueueCapacity   int
 
-	TotalItems         uint64
-	TotalCommitLatency time.Duration
-	LastCommitLatency  time.Duration
-	MinCommitLatency   time.Duration
-	MaxCommitLatency   time.Duration
-	CurrentBatchSize   uint64
-	Batches            uint64
-	AvgBatchSize       float64
-	AvgCommitLatency   time.Duration
-	Throughput         float64
+	TotalItems            uint64
+	TotalCommitLatency    time.Duration
+	LastCommitLatency     time.Duration
+	MinCommitLatency      time.Duration
+	MaxCommitLatency      time.Duration
+	CurrentBatchSize      uint64
+	Batches               uint64
+	AvgBatchSize          float64
+	AvgCommitLatency      time.Duration
+	Throughput            float64
+	TotalQueueWaitLatency time.Duration
+	LastQueueWaitLatency  time.Duration
+	MaxQueueWaitLatency   time.Duration
+	AvgQueueWaitLatency   time.Duration
 }
 
 type pipelineOp uint8
@@ -111,13 +115,14 @@ const (
 )
 
 type pipelineRequest struct {
-	op     pipelineOp
-	name   string
-	key    []byte
-	value  []byte
-	score  uint64
-	result chan error
-	seq    uint64
+	op            pipelineOp
+	name          string
+	key           []byte
+	value         []byte
+	score         uint64
+	result        chan error
+	seq           uint64
+	enqueuedNanos int64
 }
 
 // WriteFuture represents one asynchronously submitted write. The future is
@@ -178,19 +183,23 @@ type WritePipeline struct {
 	writerDone chan struct{}
 	closeErr   error
 
-	submitted       atomic.Uint64
-	committed       atomic.Uint64
-	failed          atomic.Uint64
-	transactions    atomic.Uint64
-	batches         atomic.Uint64
-	totalItems      atomic.Uint64
-	commitNanos     atomic.Uint64
-	lastNanos       atomic.Int64
-	minNanos        atomic.Uint64
-	maxNanos        atomic.Uint64
-	currentBatch    atomic.Uint64
-	lastBatchTarget atomic.Uint64
-	startNanos      int64
+	submitted          atomic.Uint64
+	committed          atomic.Uint64
+	failed             atomic.Uint64
+	transactions       atomic.Uint64
+	batches            atomic.Uint64
+	totalItems         atomic.Uint64
+	commitNanos        atomic.Uint64
+	lastNanos          atomic.Int64
+	minNanos           atomic.Uint64
+	maxNanos           atomic.Uint64
+	currentBatch       atomic.Uint64
+	lastBatchTarget    atomic.Uint64
+	queueWaitNanos     atomic.Uint64
+	lastQueueWaitNanos atomic.Int64
+	maxQueueWaitNanos  atomic.Uint64
+	startNanos         int64
+	startTime          time.Time
 }
 
 // NewWritePipeline starts one dedicated writer goroutine.
@@ -215,6 +224,7 @@ func (db *DB) NewWritePipeline(opts WritePipelineOptions) (*WritePipeline, error
 		q:          make(chan *pipelineRequest, norm.QueueSize),
 		writerDone: make(chan struct{}),
 		startNanos: time.Now().UnixNano(),
+		startTime:  time.Now(),
 	}
 	go p.run()
 	return p, nil
@@ -244,6 +254,11 @@ func (p *WritePipeline) Stats() PipelineStats {
 	if transactions > 0 {
 		avgLatency = time.Duration(totalNanos / transactions)
 	}
+	queueWaitNanos := p.queueWaitNanos.Load()
+	avgQueueWait := time.Duration(0)
+	if items > 0 {
+		avgQueueWait = time.Duration(queueWaitNanos / items)
+	}
 	throughput := 0.0
 	elapsed := time.Since(time.Unix(0, p.startNanos)).Seconds()
 	if elapsed > 0 {
@@ -257,6 +272,10 @@ func (p *WritePipeline) Stats() PipelineStats {
 		LastCommitLatency: time.Duration(p.lastNanos.Load()), MinCommitLatency: time.Duration(min),
 		MaxCommitLatency: time.Duration(p.maxNanos.Load()), CurrentBatchSize: p.currentBatch.Load(),
 		Batches: p.batches.Load(), AvgBatchSize: avgBatch, AvgCommitLatency: avgLatency, Throughput: throughput,
+		TotalQueueWaitLatency: time.Duration(queueWaitNanos),
+		LastQueueWaitLatency:  time.Duration(p.lastQueueWaitNanos.Load()),
+		MaxQueueWaitLatency:   time.Duration(p.maxQueueWaitNanos.Load()),
+		AvgQueueWaitLatency:   avgQueueWait,
 	}
 }
 
@@ -281,6 +300,7 @@ func (p *WritePipeline) submit(ctx context.Context, req *pipelineRequest) error 
 
 	p.seq++
 	req.seq = p.seq
+	req.enqueuedNanos = time.Since(p.startTime).Nanoseconds()
 	if p.opts.Backpressure == BackpressureReject {
 		select {
 		case p.q <- req:
@@ -586,28 +606,40 @@ func (p *WritePipeline) executeBatch(batch []*pipelineRequest) {
 	if len(batch) == 0 {
 		return
 	}
-	p.transactions.Add(1)
+
 	started := time.Now()
-	err := p.db.Update(func(tx *Tx) error {
-		for _, req := range batch {
-			var err error
-			switch req.op {
-			case pipelineHSet:
-				err = p.db.Hset(tx, req.name, req.key, req.value)
-			case pipelineZSet:
-				err = p.db.Zset(tx, req.name, req.key, req.score)
-			case pipelineHDel:
-				err = p.db.Hdel(tx, req.name, req.key)
-			case pipelineZDel:
-				err = p.db.Zdel(tx, req.name, req.key)
-			default:
-				err = errors.New("udb: invalid write pipeline operation")
-			}
-			if err != nil {
-				return err
-			}
+	startedElapsed := time.Since(p.startTime).Nanoseconds()
+	ops := make([]writeOp, len(batch))
+	queueWaitTotal := time.Duration(0)
+	queueWaitMax := time.Duration(0)
+	for i, req := range batch {
+		w := time.Duration(startedElapsed - req.enqueuedNanos)
+		if w < 0 {
+			w = 0
 		}
-		return nil
+		queueWaitTotal += w
+		if w > queueWaitMax {
+			queueWaitMax = w
+		}
+		switch req.op {
+		case pipelineHSet:
+			ops[i] = writeOp{kind: writeHSet, name: req.name, key: req.key, value: req.value}
+		case pipelineZSet:
+			ops[i] = writeOp{kind: writeZSet, name: req.name, key: req.key, score: req.score}
+		case pipelineHDel:
+			ops[i] = writeOp{kind: writeHDel, name: req.name, key: req.key}
+		case pipelineZDel:
+			ops[i] = writeOp{kind: writeZDel, name: req.name, key: req.key}
+		default:
+			// Preserve the V5.20/V5.21 atomic failure behavior used by tests and
+			// by callers that inject an invalid internal request.
+			ops[i] = writeOp{kind: writeOpKind(255), name: req.name, key: req.key}
+		}
+	}
+
+	p.transactions.Add(1)
+	err := p.db.Update(func(tx *Tx) error {
+		return applyWriteOps(tx, ops)
 	})
 
 	latency := time.Since(started)
@@ -615,6 +647,17 @@ func (p *WritePipeline) executeBatch(batch []*pipelineRequest) {
 	p.lastNanos.Store(int64(latency))
 	p.totalItems.Add(uint64(len(batch)))
 	p.batches.Add(1)
+	p.queueWaitNanos.Add(uint64(queueWaitTotal))
+	p.lastQueueWaitNanos.Store(int64(queueWaitMax))
+	for {
+		old := p.maxQueueWaitNanos.Load()
+		if old >= uint64(queueWaitMax) {
+			break
+		}
+		if p.maxQueueWaitNanos.CompareAndSwap(old, uint64(queueWaitMax)) {
+			break
+		}
+	}
 	for {
 		old := p.minNanos.Load()
 		if old != 0 && old <= uint64(latency) {

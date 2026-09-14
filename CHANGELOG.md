@@ -74,3 +74,17 @@
 - Snapshot is now materialized into UDB logical Hash/ZSet data in memory during one managed read transaction.
 - The source read transaction is always released before Snapshot returns, so Snapshot cannot block source mmap growth, writes, compaction, or Close.
 - Preserved the existing Snapshot public API and point-in-time consistency semantics.
+
+
+## V5.23
+
+### Unified write core and observability
+
+- Added one internal ordered mutation engine shared by Batch, WritePipeline, and public batch helpers.
+- Added per-transaction bucket caching to reduce repeated Hash/ZSet bucket lookup work.
+- Preserved write ordering, ZSet primary/secondary index atomicity, rollback behavior, and existing public APIs.
+- Added pipeline queue-wait latency metrics.
+- Added Snapshot logical byte-count and capture-duration metrics.
+- Extended `ResetMetrics` to clear cumulative Snapshot metrics.
+- Added V5.23 regression tests for unified writes, batch metrics, pipeline queue latency, Snapshot metrics, and atomic rollback.
+- No changes to recovery format, integrity semantics, lifecycle model, or default bbolt durability.

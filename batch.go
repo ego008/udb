@@ -1,7 +1,5 @@
 package udb
 
-import "encoding/binary"
-
 // ZEntry is one ZSet member and its score.
 //
 // It is intentionally separate from Entry because ZSet scores are uint64 and
@@ -11,11 +9,15 @@ type ZEntry struct {
 	Score  uint64
 }
 
+func recordBatchMetrics(db *DB, items int) {
+	if db == nil || db.metrics == nil || items <= 0 {
+		return
+	}
+	db.metrics.batchCommits.Add(1)
+	db.metrics.batchItems.Add(uint64(items))
+}
+
 // HSetBatch applies all entries in one managed write transaction.
-//
-// Compared with calling HSet once per item, this avoids one bbolt write
-// transaction/commit per item. The operation is atomic: if any item fails,
-// the whole transaction is rolled back by bbolt.
 func (db *DB) HSetBatch(name string, entries []Entry) error {
 	if err := validName(name); err != nil {
 		return err
@@ -23,21 +25,18 @@ func (db *DB) HSetBatch(name string, entries []Entry) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	return db.Update(func(tx *Tx) error {
-		b, err := getOrCreateBucket(tx, bucketName(hashPrefix, name))
-		if err != nil {
+	ops := make([]writeOp, len(entries))
+	for i := range entries {
+		if err := validKey(entries[i].Key); err != nil {
 			return err
 		}
-		for i := range entries {
-			if err := validKey(entries[i].Key); err != nil {
-				return err
-			}
-			if err := b.Put(entries[i].Key, entries[i].Value); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+		ops[i] = writeOp{kind: writeHSet, name: name, key: entries[i].Key, value: entries[i].Value}
+	}
+	if err := db.Update(func(tx *Tx) error { return applyWriteOps(tx, ops) }); err != nil {
+		return err
+	}
+	recordBatchMetrics(db, len(ops))
+	return nil
 }
 
 // ZSetBatch applies all ZSet entries in one managed write transaction.
@@ -49,27 +48,18 @@ func (db *DB) ZSetBatch(name string, entries []ZEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	return db.Update(func(tx *Tx) error {
-		// Validate the complete batch before changing the transaction so a bad
-		// member cannot leave a partially modified transaction callback.
-		for i := range entries {
-			if err := validKey(entries[i].Member); err != nil {
-				return err
-			}
-		}
-		keyBucket, scoreBucket, err := db.zsetBuckets(tx, name)
-		if err != nil {
+	ops := make([]writeOp, len(entries))
+	for i := range entries {
+		if err := validKey(entries[i].Member); err != nil {
 			return err
 		}
-		for i := range entries {
-			var score [uint64EncodedLen]byte
-			binary.BigEndian.PutUint64(score[:], entries[i].Score)
-			if err := zsetIntoBuckets(keyBucket, scoreBucket, entries[i].Member, score[:]); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+		ops[i] = writeOp{kind: writeZSet, name: name, key: entries[i].Member, score: entries[i].Score}
+	}
+	if err := db.Update(func(tx *Tx) error { return applyWriteOps(tx, ops) }); err != nil {
+		return err
+	}
+	recordBatchMetrics(db, len(ops))
+	return nil
 }
 
 // HDelBatch deletes multiple Hash keys in one managed write transaction.
@@ -80,9 +70,18 @@ func (db *DB) HDelBatch(name string, keys [][]byte) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	return db.Update(func(tx *Tx) error {
-		return db.Hmdel(tx, name, keys)
-	})
+	ops := make([]writeOp, len(keys))
+	for i := range keys {
+		if err := validKey(keys[i]); err != nil {
+			return err
+		}
+		ops[i] = writeOp{kind: writeHDel, name: name, key: keys[i]}
+	}
+	if err := db.Update(func(tx *Tx) error { return applyWriteOps(tx, ops) }); err != nil {
+		return err
+	}
+	recordBatchMetrics(db, len(ops))
+	return nil
 }
 
 // ZDelBatch deletes multiple ZSet members in one managed write transaction.
@@ -93,7 +92,16 @@ func (db *DB) ZDelBatch(name string, keys [][]byte) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	return db.Update(func(tx *Tx) error {
-		return db.Zmdel(tx, name, keys)
-	})
+	ops := make([]writeOp, len(keys))
+	for i := range keys {
+		if err := validKey(keys[i]); err != nil {
+			return err
+		}
+		ops[i] = writeOp{kind: writeZDel, name: name, key: keys[i]}
+	}
+	if err := db.Update(func(tx *Tx) error { return applyWriteOps(tx, ops) }); err != nil {
+		return err
+	}
+	recordBatchMetrics(db, len(ops))
+	return nil
 }

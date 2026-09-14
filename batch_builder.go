@@ -12,29 +12,12 @@ var (
 	ErrBatchClosed    = errors.New("udb: batch is closed")
 )
 
-type batchOpType uint8
-
-const (
-	batchHSet batchOpType = iota + 1
-	batchHDel
-	batchZSet
-	batchZDel
-)
-
-type batchOp struct {
-	op    batchOpType
-	name  string
-	key   BS
-	value BS
-	score uint64
-}
-
 // Batch is a reusable transaction builder. It is not safe for concurrent
 // mutation. Inputs are copied when appended, so callers may reuse their
 // buffers before Commit.
 type Batch struct {
 	db        *DB
-	ops       []batchOp
+	ops       []writeOp
 	committed bool
 	closed    bool
 }
@@ -47,7 +30,7 @@ func (db *DB) NewBatch() (*Batch, error) {
 	if db.opts.ReadOnly {
 		return nil, bolt.ErrDatabaseReadOnly
 	}
-	return &Batch{db: db, ops: make([]batchOp, 0, 16)}, nil
+	return &Batch{db: db, ops: make([]writeOp, 0, 16)}, nil
 }
 
 func (b *Batch) ensureOpen() error {
@@ -73,7 +56,7 @@ func (b *Batch) HSet(name string, key, value []byte) error {
 	if err := validKey(key); err != nil {
 		return err
 	}
-	b.ops = append(b.ops, batchOp{op: batchHSet, name: name, key: cloneBytes(key), value: cloneBytes(value)})
+	b.ops = append(b.ops, writeOp{kind: writeHSet, name: name, key: cloneBytes(key), value: cloneBytes(value)})
 	return nil
 }
 
@@ -87,7 +70,7 @@ func (b *Batch) HDel(name string, key []byte) error {
 	if err := validKey(key); err != nil {
 		return err
 	}
-	b.ops = append(b.ops, batchOp{op: batchHDel, name: name, key: cloneBytes(key)})
+	b.ops = append(b.ops, writeOp{kind: writeHDel, name: name, key: cloneBytes(key)})
 	return nil
 }
 
@@ -101,7 +84,7 @@ func (b *Batch) ZSet(name string, key []byte, score uint64) error {
 	if err := validKey(key); err != nil {
 		return err
 	}
-	b.ops = append(b.ops, batchOp{op: batchZSet, name: name, key: cloneBytes(key), score: score})
+	b.ops = append(b.ops, writeOp{kind: writeZSet, name: name, key: cloneBytes(key), score: score})
 	return nil
 }
 
@@ -115,7 +98,7 @@ func (b *Batch) ZDel(name string, key []byte) error {
 	if err := validKey(key); err != nil {
 		return err
 	}
-	b.ops = append(b.ops, batchOp{op: batchZDel, name: name, key: cloneBytes(key)})
+	b.ops = append(b.ops, writeOp{kind: writeZDel, name: name, key: cloneBytes(key)})
 	return nil
 }
 
@@ -140,10 +123,7 @@ func (b *Batch) validate() error {
 		return err
 	}
 	for i := range b.ops {
-		if err := validName(b.ops[i].name); err != nil {
-			return err
-		}
-		if err := validKey(b.ops[i].key); err != nil {
+		if err := validateWriteOp(&b.ops[i]); err != nil {
 			return err
 		}
 	}
@@ -172,36 +152,14 @@ func (b *Batch) CommitContext(ctx context.Context) error {
 		return nil
 	}
 	if err := b.db.Update(func(tx *Tx) error {
-		for i := range b.ops {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			op := &b.ops[i]
-			var err error
-			switch op.op {
-			case batchHSet:
-				err = b.db.Hset(tx, op.name, op.key, op.value)
-			case batchHDel:
-				err = b.db.Hdel(tx, op.name, op.key)
-			case batchZSet:
-				err = b.db.Zset(tx, op.name, op.key, op.score)
-			case batchZDel:
-				err = b.db.Zdel(tx, op.name, op.key)
-			default:
-				err = errors.New("udb: invalid batch operation")
-			}
-			if err != nil {
-				return err
-			}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		return nil
+		return applyWriteOps(tx, b.ops)
 	}); err != nil {
 		return err
 	}
 	b.committed = true
-	if b.db.metrics != nil {
-		b.db.metrics.batchCommits.Add(1)
-		b.db.metrics.batchItems.Add(uint64(len(b.ops)))
-	}
+	recordBatchMetrics(b.db, len(b.ops))
 	return nil
 }
