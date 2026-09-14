@@ -399,3 +399,82 @@ p, err := db.NewWritePipeline(udb.WritePipelineOptions{
 V5.21 does not introduce operation coalescing or reordering. Submission order,
 `Flush` barriers, `Close` drain behavior, Future completion, input-buffer
 copying, and batch-level transaction atomicity remain unchanged.
+
+## V5.22 — Transaction / Batch / Snapshot / Metrics
+
+V5.22 adds a unified transaction layer while preserving the V5.21 API and semantics.
+
+### Atomic transaction helpers
+
+```go
+err := db.Atomic(func(tx *Tx) error {
+    if err := db.Hset(tx, "user", []byte("name"), []byte("alice")); err != nil {
+        return err
+    }
+    return db.Zset(tx, "rank", []byte("alice"), 100)
+})
+```
+
+`Atomic` is an explicit name for one managed write transaction. `ReadTransaction`
+is the corresponding explicit read-side helper. Context variants check cancellation
+before transaction admission and between Batch operations; they do not forcibly abort
+a bbolt transaction that is already executing.
+
+### Transaction Batch builder
+
+```go
+batch, err := db.NewBatch()
+if err != nil { return err }
+_ = batch.HSet("user", []byte("name"), []byte("alice"))
+_ = batch.ZSet("rank", []byte("alice"), 100)
+if err := batch.Commit(); err != nil { return err }
+```
+
+`Batch` executes HSet/HDel/ZSet/ZDel in one managed write transaction, in submission
+order. Inputs are copied when added. `Commit` is one-shot; `Abort` discards pending
+operations. The builder itself is intentionally not safe for concurrent mutation.
+
+### Read Snapshot
+
+```go
+snap, err := db.Snapshot()
+if err != nil { return err }
+defer snap.Close()
+
+r := snap.HGet("user", []byte("name"))
+```
+
+A Snapshot owns one bbolt read transaction and therefore observes one consistent
+read view until `Close`. Snapshot methods are safe for concurrent readers. `Close`
+is idempotent. Because the snapshot remains an admitted lifecycle operation, a
+forgotten snapshot can prevent database Close/compaction from draining.
+
+### Database metrics
+
+```go
+m := db.Metrics()
+```
+
+V5.22 exposes transaction-level View/Update counts, errors and cumulative latency,
+plus snapshot lifecycle counters and Batch commit/item counters. `ResetMetrics`
+resets these database-level counters without touching persisted data. WritePipeline
+metrics remain available separately through `pipeline.Stats()`.
+
+### V5.22.1 Snapshot 修复
+
+V5.22.1 修复了长期持有 bbolt read transaction 导致源数据库写事务在 mmap 扩容阶段长期等待的问题。
+
+Snapshot 现在采用独立快照文件：创建 Snapshot 时仅短暂打开一次源数据库只读事务，并通过 bbolt 的一致性复制生成独立数据库；复制完成后立即释放源事务。之后 Snapshot 的读取均在自己的只读数据库上执行。
+
+因此，一个长期存活的 Snapshot 不再阻塞源数据库的：
+
+- HSet/ZSet 等写事务
+- mmap 扩容
+- CompactAndReplace
+- DB.Close
+
+Snapshot 仍保持创建瞬间的一致性视图，Snapshot.Close 幂等，并负责关闭及删除临时快照文件。
+
+### V5.22.2 Snapshot deadlock fix
+
+Snapshot now materializes the public Hash/ZSet state into memory while one managed read transaction is active. The source transaction is released before Snapshot returns. This avoids bbolt mmap/nested-transaction deadlocks while preserving point-in-time reads. The trade-off is memory usage proportional to the logical snapshot size.

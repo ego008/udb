@@ -3,6 +3,7 @@ package udb
 import (
 	"context"
 	"errors"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -18,6 +19,7 @@ type DB struct {
 	opts        Options
 	lifecycle   lifecycle
 	maintenance *MaintenanceManager
+	metrics     *dbMetricsState
 }
 
 func Open(path string) (*DB, error) { return OpenWithOptions(path, nil) }
@@ -34,7 +36,7 @@ func OpenWithOptions(path string, opts *Options) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	db := &DB{boltDB: d, opts: o}
+	db := &DB{boltDB: d, opts: o, metrics: &dbMetricsState{}}
 	db.maintenance = newMaintenanceManager(db)
 	if o.Maintenance.Enabled && !o.ReadOnly {
 		if err := db.StartMaintenance(context.Background()); err != nil {
@@ -69,9 +71,12 @@ func (db *DB) View(fn func(*Tx) error) error {
 		return err
 	}
 	defer db.lifecycle.end()
-	return d.View(func(tx *bolt.Tx) error {
+	start := time.Now()
+	err = d.View(func(tx *bolt.Tx) error {
 		return fn(newTx(tx))
 	})
+	db.recordView(start, err)
+	return err
 }
 
 // Update runs a managed write transaction. bbolt serializes write
@@ -91,9 +96,12 @@ func (db *DB) Update(fn func(*Tx) error) error {
 		return err
 	}
 	defer db.lifecycle.end()
-	return d.Update(func(tx *bolt.Tx) error {
+	start := time.Now()
+	err = d.Update(func(tx *bolt.Tx) error {
 		return fn(newTx(tx))
 	})
+	db.recordUpdate(start, err)
+	return err
 }
 
 // Close stops background maintenance, closes the admission gate, waits for

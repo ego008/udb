@@ -48,3 +48,29 @@
 - Added V5.21 adaptive and parallel-producer benchmarks.
 - Preserved V5.20 ordering, Flush, Close, Future, input-copy and transaction-atomicity semantics.
 - No changes to recovery, integrity, ZSet storage format or default durability.
+
+## V5.22
+
+- Added explicit `Atomic` / `AtomicContext` transaction helpers.
+- Added explicit `ReadTransaction` / `ReadTransactionContext` helpers.
+- Added atomic `Batch` transaction builder for mixed Hash/ZSet operations.
+- Added long-lived consistent `Snapshot` read views with idempotent Close.
+- Added database-level transaction/snapshot/batch metrics and reset support.
+- Preserved V5.21 WritePipeline ordering, async, adaptive batching and backpressure semantics.
+- Added V5.22 transaction, batch, snapshot and metrics tests/benchmarks.
+
+## V5.22.1
+
+- Fixed Snapshot long-lived read transaction deadlock/blocking with bbolt mmap growth.
+- Snapshot now creates an independent point-in-time bbolt copy using one short-lived source read transaction.
+- Snapshot lifetime no longer occupies the source DB lifecycle admission slot.
+- Snapshot reads use short-lived read transactions on the private snapshot DB.
+- Snapshot.Close is idempotent and removes its temporary snapshot file.
+- Added regressions proving an open Snapshot does not block writes or DB.Close, while preserving point-in-time consistency.
+
+## V5.22.2
+
+- Fixed Snapshot/write deadlock on bbolt v1.5.x caused by relying on a copied bbolt database as a long-lived snapshot backend.
+- Snapshot is now materialized into UDB logical Hash/ZSet data in memory during one managed read transaction.
+- The source read transaction is always released before Snapshot returns, so Snapshot cannot block source mmap growth, writes, compaction, or Close.
+- Preserved the existing Snapshot public API and point-in-time consistency semantics.
