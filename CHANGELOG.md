@@ -1,5 +1,27 @@
 # Changelog
 
+## V5.10.1
+
+### Crash-recovery matrix compile fix
+
+- Fixed `recovery_matrix_v510_test.go` to consume both return values from `CheckIntegrity()`.
+- No production code or recovery semantics were changed.
+- Preserved the complete V5.10 crash-recovery verification matrix.
+
+## V5.10
+
+### Crash-recovery verification matrix
+
+- Added process-death recovery matrix coverage for every destructive compaction boundary.
+- Audited persisted recovery state with `InspectRecovery()` before startup recovery at each fault point.
+- Verified logical snapshot preservation, bbolt structural integrity, and UDB logical integrity after recovery.
+- Verified recovery Journal and Manifest are removed after successful recovery.
+- Verified `KeepBackup=false` does not leave backup artifacts after successful recovery.
+- Added a read-only audit regression test proving `InspectRecovery()` does not mutate ambiguous recovery artifacts.
+- The recovery contract is now tested as: deterministic evidence before Open -> safe recovery or explicit failure -> integrity verification after Open.
+
+# Changelog
+
 ## V5.9
 
 ### Recovery state audit

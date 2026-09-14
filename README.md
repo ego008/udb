@@ -1,4 +1,14 @@
-# UDB V5.6
+# UDB V5.10.1
+
+
+## V5.10.1 crash-recovery matrix fix
+
+V5.10.1 is a maintenance correction for the V5.10 recovery test suite.
+
+- Fixed `recovery_matrix_v510_test.go` to correctly consume both return values from `CheckIntegrity()`.
+- The call now uses `if _, err := recovered.CheckIntegrity(); err != nil`.
+- No production recovery behavior was changed.
+- This release preserves the complete V5.10 process-death recovery matrix and integrity verification coverage.
 
 UDB is a small Go embedded database wrapper built on `go.etcd.io/bbolt`, exposing Hash and ZSet primitives while keeping transaction ownership inside UDB.
 
@@ -165,3 +175,34 @@ report, err := udb.InspectRecovery(path, opts)
 - the deterministic recovery decision: `clean`, `manifest`, `journal`, `single_artifact`, `fresh_database`, or `fail_closed`.
 
 This is useful for startup diagnostics, monitoring, incident analysis, and testing crash-recovery state matrices without modifying the database. The recovery policy remains conservative: a valid formal database always wins, and ambiguous recovery states fail closed.
+
+## V5.10 Crash-Recovery Verification Matrix
+
+V5.10 turns the compaction fault hooks into an explicit process-death verification matrix. Every destructive boundary is exercised in a child process that terminates with `os.Exit`, so deferred cleanup does not run.
+
+The matrix covers:
+
+- `FaultAfterCompact`
+- `FaultBeforeBackup`
+- `FaultAfterBackup`
+- `FaultBeforeReplace`
+- `FaultAfterReplace`
+- `FaultBeforeReopen`
+- `FaultAfterReopen`
+- `FaultAfterCheck`
+
+Each point is tested with both `KeepBackup=false` and `KeepBackup=true`. Before the recovery process starts, `InspectRecovery()` audits the persisted state without modifying any artifact. After `Open()`, tests verify:
+
+1. the logical snapshot is unchanged;
+2. bbolt structural integrity passes;
+3. UDB logical integrity passes;
+4. recovery Journal and Manifest are cleaned up;
+5. backups obey the `KeepBackup` policy.
+
+This establishes an important invariant: **after a process death at any tested compaction boundary, startup either has deterministic recovery evidence or fails closed; a successful recovery must produce the same logical database state and pass both structural and logical integrity checks.**
+
+Targeted test:
+
+```bash
+go test -run 'TestV510' -count=1
+```
