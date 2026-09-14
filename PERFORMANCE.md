@@ -1,242 +1,116 @@
-## V5.16 CheckIntegrity memory optimization
+# UDB Performance Engineering
 
-V5.15 removed the repeated secondary B-tree searches but retained two O(N)
-secondary-side structures: a `map[string]secondaryEntry` and `secondaryOrder`.
-The latter existed only to preserve deterministic orphan reporting. V5.16 removes
-`secondaryOrder`, reports remaining orphans with a final sequential secondary
-cursor scan, stores only the secondary score in the map, pre-sizes the map, and
-uses a private transaction-scoped zero-copy string view for member lookup keys.
+## V5.18 write-path profiler
 
-The zero-copy string helper is deliberately private and is never allowed to
-escape the active bbolt transaction. Public APIs continue to copy data where
-ownership requires it.
+V5.18 is a measurement release plus one narrowly scoped write-path optimization
+for ZSet batching. The goal is to separate three costs that were previously
+mixed together:
 
-Stable benchmarks:
+1. one bbolt write transaction per item;
+2. one transaction containing many item mutations;
+3. UDB's own per-item ZSet overhead.
 
-```text
-BenchmarkV516ZScan
-BenchmarkV516ZScanParallel
-BenchmarkV516CheckIntegrity
-BenchmarkV516RepairIntegrity
-BenchmarkV516ZScanEach
-```
-
-Compare V5.15 and V5.16 with the same machine, Go version, bbolt version and
-fixture size. The primary acceptance criterion is lower `B/op` and `allocs/op`
-for `BenchmarkV516CheckIntegrity` without regressions in integrity semantics.
-
-## V5.15 profile-driven changes
-
-The V5.14 profiles identified two dominant production costs:
-
-- `CheckIntegrity`: repeated secondary-index `Cursor.Seek` calls dominated CPU and allocation samples. V5.15 replaces those lookups with one primary scan plus one secondary scan and a transaction-scoped member map.
-- `Zscan`: result copying and `cloneBytes` dominated allocation samples. V5.15 uses an append arena for the public API and provides internal `zscanEach` for zero-copy transaction-scoped consumers.
-
-Re-run the stable benchmarks after building V5.15:
+### Primary benchmark matrix
 
 ```bash
-go test -run '^$' -bench '^BenchmarkV515' -benchmem -count=5
+go test -run '^$' -bench '^BenchmarkV518' -benchmem -count=5
 ```
+
+The most important comparisons are:
+
+- `BenchmarkV518Hash100IndividualTx` vs `BenchmarkV518Hash100Batch` vs `BenchmarkV518Hash100Tx`
+- `BenchmarkV518Z100IndividualTx` vs `BenchmarkV518Z100Batch` vs `BenchmarkV518Z100Tx`
+- `BenchmarkV518BatchSizeHash/1|10|50|100|500|1000|5000`
+- `BenchmarkV518BatchSizeZSet/1|10|50|100|500|1000|5000`
+- `BenchmarkV518EmptyUpdate` for the fixed transaction overhead floor
+
+The `*IndividualTx` benchmarks perform exactly 100 independent transactions
+per benchmark iteration. Their `items/op` and `items/s` metrics make the
+transaction-amortization effect explicit instead of comparing unlike units.
+
+### Writer contention
+
+V5.18 measures explicit writer counts instead of relying on `RunParallel`'s
+implementation-defined worker distribution:
+
+```bash
+go test -run '^$' -bench '^BenchmarkV518ParallelWriters(Hash|ZSet)$' -benchmem -count=5
+```
+
+Each benchmark reports `ops/s` for 1, 2, 4, 8, 16 and 32 concurrent writers.
+The expected result is a plateau rather than linear scaling because bbolt
+serializes write transactions. Extra writers are useful only if they hide
+application-level scheduling gaps; they cannot make the single bbolt writer
+itself parallel.
+
+### Durability experiment
+
+```bash
+go test -run '^$' -bench '^BenchmarkV518WriteDurability$' -benchmem -count=5
+```
+
+This reports `Sync` and `NoSync` separately. `NoSync=true` changes durability
+semantics and is **not** a performance setting that should be enabled merely
+to make production benchmarks look better.
+
+### Profiles
 
 CPU profile:
 
 ```bash
-go test -run '^$' -bench '^BenchmarkV515CheckIntegrity$' -benchmem -cpuprofile cpu-v515-integrity.out -benchtime=5s
-go tool pprof -top cpu-v515-integrity.out
+go test -run '^$' -bench '^BenchmarkV518Hash100Batch$' -benchmem -cpuprofile cpu-v518-hash-batch.out -benchtime=5s
+go tool pprof -top cpu-v518-hash-batch.out
 ```
 
-Heap profile:
+ZSet batch profile:
 
 ```bash
-go test -run '^$' -bench '^BenchmarkV515CheckIntegrity$' -benchmem -memprofile mem-v515-integrity.out -benchtime=5s
-go tool pprof -top -alloc_space mem-v515-integrity.out
+go test -run '^$' -bench '^BenchmarkV518Z100Batch$' -benchmem -cpuprofile cpu-v518-zset-batch.out -benchtime=5s
+go tool pprof -top cpu-v518-zset-batch.out
 ```
 
-# UDB Performance Engineering
-
-## V5.13 baseline
-
-V5.12 established the first benchmark baseline. V5.13 focuses on allocation and cursor overhead without changing the persistence/recovery model.
-
-Run the full benchmark suite:
+Mutex profile:
 
 ```bash
-go test -run '^$' -bench 'BenchmarkV512' -benchmem -count=5
-```
-
-Run allocation-sensitive benchmarks:
-
-```bash
-go test -run '^$' -bench 'BenchmarkV512HashGetSingle|BenchmarkV512ZScoreSingle|BenchmarkV512ZScanRange|BenchmarkV512CheckIntegrity|BenchmarkV512RepairIntegrity' -benchmem -count=5
-```
-
-## Profiling
-
-CPU:
-
-```bash
-go test -run '^$' -bench 'BenchmarkV512ZScanRange|BenchmarkV512CheckIntegrity' -benchmem -cpuprofile cpu.out
- go tool pprof -http=:0 cpu.out
-```
-
-Memory:
-
-```bash
-go test -run '^$' -bench 'BenchmarkV512ZScanRange|BenchmarkV512CheckIntegrity' -benchmem -memprofile mem.out
- go tool pprof -http=:0 mem.out
-```
-
-Mutex contention:
-
-```bash
-go test -run '^$' -bench 'BenchmarkV512HashGetParallel|BenchmarkV512HashUpdateParallel|BenchmarkV512ZScanRangeParallel' -benchmem -mutexprofile mutex.out
- go tool pprof -http=:0 mutex.out
+go test -run '^$' -bench '^BenchmarkV518ParallelWriters(Hash|ZSet)$' -benchmem -mutexprofile mutex-v518.out -benchtime=5s
+go tool pprof -top mutex-v518.out
 ```
 
 Blocking profile:
 
 ```bash
-go test -run '^$' -bench 'BenchmarkV512HashGetParallel|BenchmarkV512HashUpdateParallel|BenchmarkV512ZScanRangeParallel' -benchmem -blockprofile block.out
- go tool pprof -http=:0 block.out
+go test -run '^$' -bench '^BenchmarkV518ParallelWriters(Hash|ZSet)$' -benchmem -blockprofile block-v518.out -benchtime=5s
+go tool pprof -top block-v518.out
 ```
 
-## V5.13 optimization principles
+### V5.18 production change
 
-1. Keep bbolt mmap-backed values private to the transaction.
-2. Optimize allocations only where ownership can remain explicit.
-3. Do not introduce a global lock merely to improve a single benchmark.
-4. Do not use mtime or heuristic recovery decisions.
-5. Keep `CheckIntegrity` read-only.
-6. Keep `RepairIntegrity` fail-closed for malformed scores unless the caller explicitly opts into dropping them.
-7. Every performance change must pass normal tests, race tests, property tests and fuzz regression seeds.
+`ZSetBatch` now looks up the two ZSet buckets once per transaction, encodes
+scores into a fixed-width stack buffer, and calls a private bucket-level core.
+The core preserves the existing primary member→score map and secondary
+score→member index semantics, including unchanged-score index repair and old
+index deletion when a score changes.
 
-## Comparing versions
+The public semantics, recovery model, integrity checks and transaction atomicity
+are unchanged. `Zset` continues to use the same canonical core, so there is one
+implementation of the actual two-index mutation logic.
 
-For meaningful before/after comparisons, keep the following constant:
+No new global lock was introduced. No recovery heuristic was changed. No
+`NoSync` default was changed.
 
-- OS and architecture
-- Go version
-- bbolt version
-- database fixture size
-- key/value sizes
-- benchmark command and `-count`
+### Interpreting V5.18
 
-Use `benchstat` when available:
+The acceptance questions are:
 
-```bash
-go test -run '^$' -bench 'BenchmarkV512' -benchmem -count=10 > v512.txt
-go test -run '^$' -bench 'BenchmarkV512' -benchmem -count=10 > v513.txt
-benchstat v512.txt v513.txt
-```
+- How many items/s does one transaction gain over 100 individual transactions?
+- At what batch size does throughput stop improving materially?
+- Is the knee different for Hash and ZSet?
+- How much allocation overhead remains in ZSetBatch after removing repeated
+  bucket lookup and score encoding allocations?
+- Does writer concurrency plateau as expected?
+- How large is the Sync vs NoSync delta, and is that delta worth the durability
+  trade-off for a particular application?
 
-## V5.14 profiling baseline
-
-V5.14 does not intentionally change the storage or recovery algorithms. It
-adds stable `BenchmarkV514*` names so profiling commands can target one
-operation without depending on the historical V5.12 benchmark names.
-
-The V5.14 wrappers reuse the exact V5.12/V5.13 workloads, so results can be
-compared directly with the previous baseline.
-
-### CPU profile
-
-For a focused CPU profile:
-
-```bash
-go test -run '^$' -bench '^BenchmarkV514CheckIntegrity$' -benchmem -cpuprofile cpu-check.out -benchtime=5s
- go tool pprof -top cpu-check.out
-```
-
-Interactive web UI:
-
-```bash
-go tool pprof -http=:0 cpu-check.out
-```
-
-Recommended CPU targets:
-
-```bash
-go test -run '^$' -bench '^BenchmarkV514ZScan$' -benchmem -cpuprofile cpu-zscan.out -benchtime=5s
-go test -run '^$' -bench '^BenchmarkV514CheckIntegrity$' -benchmem -cpuprofile cpu-integrity.out -benchtime=5s
-go test -run '^$' -bench '^BenchmarkV514RepairIntegrity$' -benchmem -cpuprofile cpu-repair.out -benchtime=5s
-go test -run '^$' -bench '^BenchmarkV514Compact$' -benchmem -cpuprofile cpu-compact.out -benchtime=3x
-```
-
-### Heap / allocation profile
-
-```bash
-go test -run '^$' -bench '^BenchmarkV514ZScan$' -benchmem -memprofile mem-zscan.out -benchtime=5s
-go tool pprof -top -alloc_space mem-zscan.out
-```
-
-Use `-inuse_space` when the question is retained heap rather than cumulative
-allocation:
-
-```bash
-go tool pprof -top -inuse_space mem-zscan.out
-```
-
-### Mutex contention
-
-Mutex profiling is useful for the parallel read/write paths:
-
-```bash
-go test -run '^$' -bench '^BenchmarkV514HashGetParallel$' -benchmem -mutexprofile mutex-hget.out -benchtime=5s
-go test -run '^$' -bench '^BenchmarkV514HashUpdateParallel$' -benchmem -mutexprofile mutex-hupdate.out -benchtime=5s
-go test -run '^$' -bench '^BenchmarkV514ZScanParallel$' -benchmem -mutexprofile mutex-zscan.out -benchtime=5s
-```
-
-Then inspect:
-
-```bash
-go tool pprof -top mutex-hget.out
-go tool pprof -top mutex-hupdate.out
-go tool pprof -top mutex-zscan.out
-```
-
-### Blocking profile
-
-```bash
-go test -run '^$' -bench '^BenchmarkV514HashGetParallel$' -benchmem -blockprofile block-hget.out -benchtime=5s
-go test -run '^$' -bench '^BenchmarkV514HashUpdateParallel$' -benchmem -blockprofile block-hupdate.out -benchtime=5s
-go test -run '^$' -bench '^BenchmarkV514ZScanParallel$' -benchmem -blockprofile block-zscan.out -benchtime=5s
-```
-
-### Scheduler / execution trace
-
-When a profile shows unexpected goroutine scheduling or blocking overhead,
-collect a trace from a short benchmark run:
-
-```bash
-go test -run '^$' -bench '^BenchmarkV514HashGetParallel$' -benchtime=3s -trace trace-hget.out
-go tool trace trace-hget.out
-```
-
-### Stable comparison commands
-
-Run V5.14 with the same machine, Go version, bbolt version, fixture sizes and
-benchmark count used for the historical baseline:
-
-```bash
-go test -run '^$' -bench 'BenchmarkV514' -benchmem -count=5 > v514.txt
-go test -run '^$' -bench 'BenchmarkV512' -benchmem -count=5 > v512.txt
-benchstat v512.txt v514.txt
-```
-
-For the V5.13.1 source tree, use the V5.12 benchmark names as before. V5.14's
-stable names are only a profiling/navigation improvement; they intentionally
-call the same benchmark bodies.
-
-### Profiling rules for V5.14
-
-1. Profile one workload at a time before making an optimization.
-2. Treat `bbolt`, `syscall`, `fsync`, mmap/page handling and filesystem time as
-   potentially unavoidable before changing UDB code.
-3. Separate CPU time from allocation volume. A reduction in `allocs/op` is not
-   automatically a reduction in wall-clock latency.
-4. For parallel benchmarks, inspect mutex and block profiles before adding or
-   removing synchronization.
-5. Do not weaken transaction ownership, lifecycle admission, recovery journal
-   semantics, manifest validation, or integrity guarantees for performance.
-6. Any optimization must pass `go test ./...`, `go test -race ./...`, the V5.11
-   property/fuzz regression tests, and the V5.13 shared-score integrity test.
+Do not optimize further from a single `ns/op` result. Use `benchstat` and CPU,
+heap, mutex and block profiles on the same machine, Go version, bbolt version,
+fixture and benchmark command.

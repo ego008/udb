@@ -425,6 +425,19 @@ func (db *DB) zset(tx *Tx, name string, key, score []byte) error {
 	if err != nil {
 		return err
 	}
+	return zsetIntoBuckets(keyBucket, scoreBucket, key, score)
+}
+
+// zsetIntoBuckets is the allocation-conscious core of ZSet mutation. The
+// caller owns bucket lookup and transaction/name validation, which lets batch
+// writers avoid repeating those fixed-cost operations for every member.
+func zsetIntoBuckets(keyBucket, scoreBucket *bolt.Bucket, key, score []byte) error {
+	if keyBucket == nil || scoreBucket == nil {
+		return bolt.ErrBucketNotFound
+	}
+	if len(score) != uint64EncodedLen {
+		return ErrInvalidScore
+	}
 	oldScore := scoreBucket.Get(key)
 	newIndexKey := Bconcat(score, key)
 	if bytes.Equal(oldScore, score) {

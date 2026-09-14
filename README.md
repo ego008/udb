@@ -1,3 +1,33 @@
+## V5.18 write-path optimization
+
+V5.18 adds a transaction-amortization benchmark suite and a narrowly scoped ZSet batch optimization. `ZSetBatch` now reuses bucket lookups and avoids per-item score-buffer heap allocation while preserving the same two-index atomic semantics. See `PERFORMANCE.md` for the benchmark matrix, durability experiment, writer contention tests and profiling commands.
+
+## V5.17 write/transaction performance
+
+V5.17 focuses on the write path identified after the V5.16 integrity work.
+The main optimization is explicit high-level batch APIs so callers can group
+many mutations into one managed bbolt write transaction. This avoids repeated
+transaction acquisition and commit/fsync overhead when an application already
+has a batch of changes.
+
+Added APIs:
+
+```go
+db.HSetBatch(name, []udb.Entry{...})
+db.ZSetBatch(name, []udb.ZEntry{...})
+db.HDelBatch(name, keys)
+db.ZDelBatch(name, keys)
+```
+
+Batch operations are atomic at the bbolt transaction boundary. Empty batches
+are no-ops. Validation is performed before mutation for HSetBatch/ZSetBatch.
+No storage format or recovery semantics changed.
+
+The V5.17 benchmark suite compares high-level single writes with 100-item
+batches and compares the new batch APIs with the existing transaction-level
+Hmset/Zmset primitives. It also keeps parallel single-write benchmarks to
+watch for concurrency regressions.
+
 ## V5.16 performance
 
 V5.16 continues the V5.15 profile-driven optimization of ZSet integrity
