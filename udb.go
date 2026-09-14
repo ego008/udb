@@ -102,6 +102,13 @@ func cloneBytes(v []byte) BS {
 	return append(BS(nil), v...)
 }
 
+// cloneZSetIndexKey copies one physical ZSet index key once and returns the
+// copied key. Callers may expose disjoint subslices (member and score) without
+// retaining any reference into Bolt's mmap pages.
+func cloneZSetIndexKey(v []byte) BS {
+	return cloneBytes(v)
+}
+
 func newReply() *Reply {
 	return &Reply{State: replyError, Data: make([]BS, 0, 2)}
 }
@@ -241,20 +248,18 @@ func (db *DB) Hget(tx *Tx, name string, key []byte) *Reply {
 	if err := validKey(key); err != nil {
 		return errorReply(err)
 	}
-	r := newReply()
 	b := tx.bucket(bucketName(hashPrefix, name))
 	if b == nil {
-		r.State = bucketNotFound
-		return r
+		return &Reply{State: bucketNotFound, Data: nil}
 	}
 	v := b.Get(key)
 	if v == nil {
-		r.State = keyNotFound
-		return r
+		return &Reply{State: keyNotFound, Data: nil}
 	}
-	r.State = replyOK
-	r.Data = append(r.Data, cloneBytes(v))
-	return r
+	// Keep the returned bytes independent from Bolt's mmap page while avoiding
+	// the extra slice allocation performed by newReply()+append().
+	data := cloneBytes(v)
+	return &Reply{State: replyOK, Data: []BS{data}}
 }
 
 func (db *DB) HgetInt(tx *Tx, name string, key []byte) (uint64, error) {
@@ -582,20 +587,16 @@ func (db *DB) Zget(tx *Tx, name string, key []byte) *Reply {
 	if err := validKey(key); err != nil {
 		return errorReply(err)
 	}
-	r := newReply()
 	b := tx.bucket(bucketName(zetScorePrefix, name))
 	if b == nil {
-		r.State = bucketNotFound
-		return r
+		return &Reply{State: bucketNotFound, Data: nil}
 	}
 	v := b.Get(key)
 	if v == nil {
-		r.State = keyNotFound
-		return r
+		return &Reply{State: keyNotFound, Data: nil}
 	}
-	r.State = replyOK
-	r.Data = append(r.Data, cloneBytes(v))
-	return r
+	data := cloneBytes(v)
+	return &Reply{State: replyOK, Data: []BS{data}}
 }
 
 // Zscore is the typed equivalent of Zget.
@@ -717,7 +718,10 @@ func (db *DB) zscan(tx *Tx, name string, keyStart, scoreStart []byte, limit int,
 	if len(scoreStart) != 0 && len(scoreStart) != uint64EncodedLen {
 		return errorReply(ErrInvalidScore)
 	}
-	r := newReply()
+	// Each result entry is returned as two slices (member, score). The two
+	// slices can safely share one backing allocation because they occupy
+	// disjoint regions of the copied secondary-index key.
+	r := &Reply{State: replyNotFound, Data: make([]BS, 0, 2*limit)}
 	b := tx.bucket(bucketName(zetKeyPrefix, name))
 	if b == nil {
 		r.State = bucketNotFound
@@ -731,13 +735,26 @@ func (db *DB) zscan(tx *Tx, name string, keyStart, scoreStart []byte, limit int,
 		k, v = zseekForward(c, keyStart, scoreStart)
 	}
 	n := 0
+	// Keep returned entries independent from Bolt's mmap pages, but avoid one
+	// heap allocation per entry. Each append may grow the arena; previously
+	// returned slices remain valid because r.Data keeps a reference to their
+	// old backing array when a growth occurs.
+	var arena []byte
 	for k != nil && n < limit {
 		if len(k) < uint64EncodedLen {
 			r.Err = ErrInvalidScore
 			r.State = replyError
 			return r
 		}
-		r.Data = append(r.Data, cloneBytes(k[8:]), cloneBytes(k[:8]))
+		start := len(arena)
+		arena = append(arena, k...)
+		entry := arena[start:]
+		// Cap both returned slices at their logical length. Without the full
+		// slice expression below, a caller could append to one result and
+		// overwrite adjacent results in the shared arena.
+		member := entry[uint64EncodedLen:len(entry):len(entry)]
+		score := entry[:uint64EncodedLen:uint64EncodedLen]
+		r.Data = append(r.Data, member, score)
 		n++
 		if reverse {
 			k, v = c.Prev()
@@ -752,6 +769,54 @@ func (db *DB) zscan(tx *Tx, name string, keyStart, scoreStart []byte, limit int,
 		r.State = replyNotFound
 	}
 	return r
+}
+
+// zscanEach scans ZSet entries in transaction scope without cloning member
+// bytes. The callback must not retain member after the surrounding View/Update
+// transaction returns because the slice points into bbolt's mmap-backed page.
+// This is an internal zero-copy path used by algorithms that can consume data
+// synchronously and do not need Reply's post-transaction ownership guarantee.
+func (db *DB) zscanEach(tx *Tx, name string, keyStart, scoreStart []byte, limit int, reverse bool, fn func(member []byte, score uint64) error) error {
+	if err := validTx(tx); err != nil {
+		return err
+	}
+	if err := validName(name); err != nil {
+		return err
+	}
+	if err := validLimit(limit); err != nil {
+		return err
+	}
+	if len(scoreStart) != 0 && len(scoreStart) != uint64EncodedLen {
+		return ErrInvalidScore
+	}
+	if fn == nil {
+		return ErrNilTransactionFunc
+	}
+	b := tx.bucket(bucketName(zetKeyPrefix, name))
+	if b == nil {
+		return nil
+	}
+	c := b.Cursor()
+	var k []byte
+	if reverse {
+		k, _ = zseekReverse(c, keyStart, scoreStart)
+	} else {
+		k, _ = zseekForward(c, keyStart, scoreStart)
+	}
+	for n := 0; k != nil && n < limit; n++ {
+		if len(k) < uint64EncodedLen {
+			return ErrInvalidScore
+		}
+		if err := fn(k[uint64EncodedLen:], binaryScore(k[:uint64EncodedLen])); err != nil {
+			return err
+		}
+		if reverse {
+			k, _ = c.Prev()
+		} else {
+			k, _ = c.Next()
+		}
+	}
+	return nil
 }
 
 func zseekForward(c *bolt.Cursor, keyStart, scoreStart []byte) (k, v []byte) {

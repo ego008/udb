@@ -1,3 +1,7 @@
+## V5.15 performance
+
+V5.15 applies profile-driven optimization to ZSet integrity verification and scanning. `CheckIntegrity` no longer performs one secondary B-tree seek per primary member, and `Zscan` uses an arena to reduce per-result allocations. An internal transaction-scoped `zscanEach` path is available for synchronous zero-copy consumers.
+
 # UDB V5.10.1
 
 
@@ -228,3 +232,9 @@ Run the fuzz target briefly with:
 ```bash
 go test -run '^$' -fuzz FuzzV511RandomOperationStream -fuzztime=30s
 ```
+
+## V5.14 performance profiling
+
+V5.14 adds stable `BenchmarkV514*` benchmark names and profiling instructions
+in `PERFORMANCE.md`. The profiling benchmarks reuse the established workloads
+and do not alter the database implementation or persistence semantics.

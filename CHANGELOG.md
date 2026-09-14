@@ -1,128 +1,68 @@
-## V5.11.1
+## V5.15
 
-### Property test regression fix
+Performance optimization release driven by V5.14 CPU and allocation profiles.
 
-- Fixed the V5.11 compact/repair property test to compare the reference model against the correct `cycle-hash` and `cycle-zset` buckets.
-- Kept the production database implementation unchanged.
+### ZSet integrity scanner
 
-# Changelog
+- Replaced per-primary-member secondary-index `Cursor.Seek` validation with a two-pass primary/secondary scan backed by a transaction-scoped member map.
+- Removed the N×B-tree-search behavior that dominated `CheckIntegrity` CPU and allocation profiles.
+- Preserved detection of missing, orphaned, malformed and mismatched ZSet indexes, including the historical missing-index + mismatch accounting for a wrong-score secondary entry.
+- `CheckIntegrity` and `RepairIntegrity` continue to share the same logical report/repair semantics.
 
-## V5.10.1
+### ZScan
 
-### Crash-recovery matrix compile fix
+- Replaced one heap allocation per returned ZSet entry with an append arena while retaining the public post-transaction ownership guarantee.
+- Added an internal transaction-scoped `zscanEach` zero-copy path for synchronous consumers that do not need to retain Bolt-backed slices.
+- Added V5.15 benchmark coverage and regression tests.
 
-- Fixed `recovery_matrix_v510_test.go` to consume both return values from `CheckIntegrity()`.
-- No production code or recovery semantics were changed.
-- Preserved the complete V5.10 crash-recovery verification matrix.
+### Compatibility
 
-## V5.10
-
-### Crash-recovery verification matrix
-
-- Added process-death recovery matrix coverage for every destructive compaction boundary.
-- Audited persisted recovery state with `InspectRecovery()` before startup recovery at each fault point.
-- Verified logical snapshot preservation, bbolt structural integrity, and UDB logical integrity after recovery.
-- Verified recovery Journal and Manifest are removed after successful recovery.
-- Verified `KeepBackup=false` does not leave backup artifacts after successful recovery.
-- Added a read-only audit regression test proving `InspectRecovery()` does not mutate ambiguous recovery artifacts.
-- The recovery contract is now tested as: deterministic evidence before Open -> safe recovery or explicit failure -> integrity verification after Open.
+- No storage format or recovery decision logic changed.
+- Existing public `Zscan` ownership semantics are preserved.
 
 # Changelog
 
-## V5.9
+## V5.14
 
-### Recovery state audit
+Performance profiling infrastructure release based on V5.13.1.
 
-- Added non-destructive `InspectRecovery(path, opts)` diagnostics.
-- Added explicit recovery decisions for clean, manifest, journal, single-artifact, fresh-database, and fail-closed states.
-- Added read-only validation and SHA-256 reporting for discovered compact/backup artifacts.
-- Added V5.9 regression tests for fresh state, formal-database precedence, ambiguous artifacts, and manifest checksum mismatch.
-- Preserved the fail-closed recovery policy: no heuristic promotion is performed when durable recovery evidence is ambiguous.
+### Performance profiling
 
-## V5.7.1
+- Added stable `BenchmarkV514*` benchmark names for Hash, ZSet, Integrity and Compact workloads.
+- Reused the established V5.12/V5.13 benchmark bodies so profiling does not change the historical workload.
+- Added documented CPU, heap, mutex, block and execution-trace profiling workflows.
+- Added a repeatable `benchstat` comparison workflow for V5.12 versus V5.14.
 
-### Integrity & self-healing fix
+### Compatibility and correctness
 
-- Fixed a Go compile error in `integrity.go` caused by using the wrong `bbolt.Tx.ForEach` callback signature.
-- Updated top-level bucket scans to use `func(name []byte, b *bbolt.Bucket) error`, matching bbolt v1.5.0.
-- Reused the bucket returned by `ForEach` instead of performing redundant bucket lookups.
-- Preserved all V5.7 integrity, repair, and compaction verification behavior.
+- No public API was removed or changed.
+- No storage format or recovery decision logic was changed.
+- V5.13.1 shared-score integrity behavior remains intact.
+- Profiling helpers contain no production-code synchronization or persistence changes.
 
-## V5.7
 
-### Integrity & self-healing
+## V5.13
 
-- Added `CheckIntegrity()` for read-only logical consistency checking of UDB Hash/ZSet structures.
-- Added detailed ZSet checks for missing, orphaned, malformed, and mismatched secondary indexes.
-- Added detection of an orphan ZSet key-index bucket without a score bucket.
-- Added `RepairIntegrity()` with deterministic secondary-index rebuild from the primary score map.
-- Invalid primary ZSet scores are preserved by default; destructive cleanup requires `RepairOptions{DropInvalidScores: true}`.
-- Added integrity checks before/after compaction through `MaintenanceConfig.IntegrityBeforeCompact` and `IntegrityAfterCompact`.
-- Enabled post-compaction integrity verification by default.
-- Added V5.7 integrity regression tests for healthy data, missing/orphan indexes, mismatched indexes, invalid scores, and orphan buckets.
+Performance engineering release based on the V5.12 benchmark baseline.
 
-## V5.6.3
+### Performance changes
 
-### Recovery safety
+- Optimized `Hget` and `Zget` reply construction to avoid the extra `newReply()+append` slice-growth path on successful reads.
+- Optimized `Zscan` result copying: one allocation now backs the copied `score||member` index key, with disjoint subslices returned as member and score. The returned data remains independent from bbolt's mmap pages.
+- Optimized `CheckIntegrity` ZSet validation by reusing a single secondary-index cursor instead of creating a cursor for every primary score entry.
+- Replaced per-entry composite-key construction in the integrity check with cursor seeking by the fixed-width score prefix, avoiding one temporary `score||member` allocation per entry.
+- Optimized `RepairIntegrity` to rebuild the secondary index directly from the primary score map instead of first materializing all valid entries into an O(N) temporary slice.
+- Added a profiling/performance workflow document covering CPU, memory, mutex and block profiling.
 
-- Fixed journal-less recovery artifact discovery to recognize both `.compact.<suffix>` and `.compact-<suffix>` temporary artifact names.
-- Tightened journal-less recovery: if more than one fully valid recovery artifact exists, recovery now fails closed instead of selecting by mtime.
-- Preserved the rule that a valid formal database always wins over stale or corrupt recovery artifacts.
-- Added recovery state-matrix coverage for ambiguous artifacts, corrupt journals, single valid artifact recovery, and formal-database precedence.
+### Compatibility and correctness
 
-## V5.6.1
+- No public API was removed or changed.
+- V5.11.1 recovery, integrity, property and fuzz semantics are preserved.
+- Malformed primary ZSet scores are still fail-closed unless `RepairOptions.DropInvalidScores` is explicitly enabled.
+- Returned `Reply.Data` remains safe after the read transaction closes.
 
-### Crash consistency and recovery
+## V5.13.1
 
-- Fixed startup recovery for a brand-new database with no formal DB, journal, or recovery artifacts.
-- Startup now treats that state as a normal fresh-open case instead of reporting a recovery failure.
-
-## V5.6
-
-### Crash consistency and recovery
-
-- Added durability-aware recovery journal persistence: write, file sync, atomic rename, and Unix directory sync.
-- Added explicit synchronization of the compacted database before replacement.
-- Added directory synchronization around destructive compaction renames/removals on Unix.
-- Startup recovery now tolerates corrupt or partially written journals when the formal database is already valid.
-- Added fallback artifact scanning when the journal is missing or unusable and the formal database is unavailable.
-- Recovery candidates are always validated with a complete bbolt integrity check before promotion.
-- Added cross-platform recovery handling for an existing invalid formal file when rename cannot overwrite it directly.
-- Added process-death tests for compaction fault boundaries, with and without backups.
-- Added tests for corrupt journals, journal-independent temp recovery, repeated recovery idempotence, and atomic journal replacement.
-
-## V5.5.1
-
-- Fixed Go compile error caused by comparing `MaintenanceConfig` as a whole after adding the function-valued `CompactFaultInjector` field.
-- Replaced whole-struct zero comparison with an explicit zero-value predicate that safely handles the function field.
-
-## V5.5
-
-- Added deterministic `CompactFaultPoint` / `CompactFaultInjector` hooks for reliability testing.
-- Added a recovery journal for `CompactAndReplace` destructive stages.
-- Added startup recovery for interrupted compact-and-replace operations.
-- Added rollback handling for failures before/after backup, replacement, reopen, and post-check stages.
-- Added logical snapshot, backup/rollback, ZSet repair, mixed pressure, lifecycle-race, and close/reopen persistence tests.
-- `CompactTo` now explicitly rejects an existing directory destination.
-
-## V5.8
-
-### Durable recovery manifest
-
-- Added a durable recovery manifest alongside the existing recovery journal.
-- Added per-compaction operation IDs and SHA-256 digests for compact/backup artifacts.
-- Startup recovery now prefers a valid manifest and verifies the recorded artifact digest before promotion.
-- A valid manifest with an unverifiable artifact fails closed instead of falling back to filename/mtime guessing.
-- Preserved compatibility with V5.6 journal recovery and conservative artifact scanning when the manifest is absent or corrupt.
-- Recovery manifest is atomically persisted with file and directory syncs.
-- Added V5.8 recovery-manifest regression tests for journal-less recovery, checksum mismatch, and corrupt-manifest fallback.
-
-## V5.11
-
-### Property-based and fuzz testing
-
-- Added a deterministic reference-model property test for randomized Hash/ZSet operation sequences.
-- Added repeated corruption → integrity check → repair → compact → integrity check cycles.
-- Added Go fuzz testing for arbitrary Hash/ZSet operation streams with logical model comparison.
-- Added bounded fuzz execution and database-growth guards to keep fuzz cases deterministic and safe.
-- The fuzz/property layer verifies application-visible state separately from UDB's physical index representation.
+- Fixed an integrity-check regression introduced by the V5.13 ZSet allocation optimization.
+- `cursorHasScoreMember` now scans the complete contiguous `score||member` range after `Cursor.Seek(score)`, so multiple members sharing the same score are handled correctly.
+- Added `TestV513IntegritySharedScore` regression coverage.

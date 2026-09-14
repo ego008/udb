@@ -208,60 +208,158 @@ func checkZSetIntegrity(tx *Tx, name string) (ZSetIntegrityReport, []IntegrityIs
 	keyBucket := tx.bucket(bucketName(zetKeyPrefix, name))
 	scoreBucket := tx.bucket(bucketName(zetScorePrefix, name))
 	if scoreBucket == nil {
-		return ZSetIntegrityReport{Name: name, Valid: keyBucket == nil}, nil, nil
+		if keyBucket == nil {
+			return ZSetIntegrityReport{Name: name, Valid: true}, nil, nil
+		}
+		// A key-index bucket without its primary score bucket is corruption.
+		// Count it with a sequential cursor rather than a Bucket.Stats call.
+		count := 0
+		c := keyBucket.Cursor()
+		for k, _ := c.First(); k != nil; k, _ = c.Next() {
+			count++
+		}
+		issues := make([]IntegrityIssue, 0, 1)
+		if count > 0 {
+			issues = append(issues, IntegrityIssue{
+				Kind:   issueMissingScoreIndex,
+				Name:   name,
+				Detail: "key index bucket exists without score bucket",
+			})
+		}
+		return ZSetIntegrityReport{
+			Name:              name,
+			KeyIndexEntries:   count,
+			MissingScoreIndex: count,
+			Valid:             count == 0,
+		}, issues, nil
 	}
-	zr := ZSetIntegrityReport{Name: name, ScoreEntries: scoreBucket.Stats().KeyN, Valid: true}
+
+	// V5.15 replaces the V5.13 per-member Cursor.Seek strategy with two
+	// sequential scans. First index the secondary score||member bucket in a
+	// transaction-scoped map. Then scan the authoritative member->score bucket
+	// and validate each member against that map. Finally, any secondary entries
+	// left in the map are orphans. This removes the N*log(N) B-tree-search cost
+	// while preserving the historical issue ordering: primary-side problems
+	// are reported before orphan/invalid secondary entries.
+	type secondaryEntry struct {
+		score []byte
+		valid bool
+	}
+	secondary := make(map[string]secondaryEntry)
+	secondaryOrder := make([]string, 0)
+	zr := ZSetIntegrityReport{Name: name, Valid: true}
 	issues := make([]IntegrityIssue, 0)
 
-	c := scoreBucket.Cursor()
-	for k, score := c.First(); k != nil; k, score = c.Next() {
-		if len(score) != uint64EncodedLen {
-			zr.InvalidScoreValue++
-			zr.Valid = false
-			issues = append(issues, IntegrityIssue{Kind: issueInvalidScore, Name: name, Key: cloneBytes(k), Detail: fmt.Sprintf("score length=%d", len(score))})
-			continue
-		}
-		idx := Bconcat(score, k)
-		if keyBucket == nil || !bucketHasKey(keyBucket, idx) {
-			zr.MissingKeyIndex++
-			zr.Valid = false
-			issues = append(issues, IntegrityIssue{Kind: issueMissingKeyIndex, Name: name, Member: cloneBytes(k), Detail: "score entry has no secondary key index"})
-			continue
-		}
-	}
-
 	if keyBucket != nil {
-		zr.KeyIndexEntries = keyBucket.Stats().KeyN
-		c = keyBucket.Cursor()
-		for k, _ := c.First(); k != nil; k, _ = c.Next() {
+		kc := keyBucket.Cursor()
+		for k, _ := kc.First(); k != nil; k, _ = kc.Next() {
+			zr.KeyIndexEntries++
 			if len(k) < uint64EncodedLen {
 				zr.InvalidKeyIndex++
 				zr.Valid = false
-				issues = append(issues, IntegrityIssue{Kind: issueInvalidKeyIndex, Name: name, Key: cloneBytes(k), Detail: fmt.Sprintf("index key length=%d", len(k))})
+				issues = append(issues, IntegrityIssue{
+					Kind:   issueInvalidKeyIndex,
+					Name:   name,
+					Key:    cloneBytes(k),
+					Detail: fmt.Sprintf("index key length=%d", len(k)),
+				})
 				continue
 			}
-			score := k[:uint64EncodedLen]
 			member := k[uint64EncodedLen:]
 			if len(member) == 0 {
 				zr.InvalidKeyIndex++
 				zr.Valid = false
-				issues = append(issues, IntegrityIssue{Kind: issueInvalidKeyIndex, Name: name, Key: cloneBytes(k), Detail: "empty member"})
+				issues = append(issues, IntegrityIssue{
+					Kind:   issueInvalidKeyIndex,
+					Name:   name,
+					Key:    cloneBytes(k),
+					Detail: "empty member",
+				})
 				continue
 			}
-			stored := scoreBucket.Get(member)
-			if stored == nil {
-				zr.MissingScoreIndex++
-				zr.Valid = false
-				issues = append(issues, IntegrityIssue{Kind: issueMissingScoreIndex, Name: name, Member: cloneBytes(member), Key: cloneBytes(k), Detail: "secondary index has no primary score entry"})
-				continue
-			}
-			if !bytes.Equal(stored, score) {
-				zr.MismatchedScore++
-				zr.Valid = false
-				issues = append(issues, IntegrityIssue{Kind: issueMismatchedScore, Name: name, Member: cloneBytes(member), Key: cloneBytes(k), Detail: "secondary score differs from primary score"})
-			}
+			memberKey := string(member)
+			// A bbolt bucket cannot contain duplicate physical keys, so a later
+			// assignment here can only happen if a malformed key representation
+			// somehow maps to the same member, which is not possible for valid
+			// score||member keys. Keep the original order for deterministic reports.
+			secondary[memberKey] = secondaryEntry{score: k[:uint64EncodedLen], valid: true}
+			secondaryOrder = append(secondaryOrder, memberKey)
 		}
 	}
+
+	// The primary score bucket is authoritative. Its cursor order is member
+	// order, so all primary-side issue reporting remains deterministic.
+	pc := scoreBucket.Cursor()
+	for member, score := pc.First(); member != nil; member, score = pc.Next() {
+		zr.ScoreEntries++
+		memberKey := string(member)
+		entry, hasSecondary := secondary[memberKey]
+		if len(score) != uint64EncodedLen {
+			zr.InvalidScoreValue++
+			zr.Valid = false
+			issues = append(issues, IntegrityIssue{
+				Kind:   issueInvalidScore,
+				Name:   name,
+				Key:    cloneBytes(member),
+				Detail: fmt.Sprintf("score length=%d", len(score)),
+			})
+			if hasSecondary {
+				zr.MismatchedScore++
+				zr.Valid = false
+				issues = append(issues, IntegrityIssue{
+					Kind:   issueMismatchedScore,
+					Name:   name,
+					Member: cloneBytes(member),
+					Key:    joinScoreMember(entry.score, member),
+					Detail: "secondary score differs from primary score",
+				})
+				delete(secondary, memberKey)
+			}
+			continue
+		}
+		if !hasSecondary {
+			zr.MissingKeyIndex++
+			zr.Valid = false
+			issues = append(issues, IntegrityIssue{
+				Kind:   issueMissingKeyIndex,
+				Name:   name,
+				Member: cloneBytes(member),
+				Detail: "score entry has no secondary key index",
+			})
+			continue
+		}
+		if !bytes.Equal(entry.score, score) {
+			// Historical behavior reports both the missing exact score||member
+			// index and the mismatched secondary score.
+			zr.MissingKeyIndex++
+			zr.MismatchedScore++
+			zr.Valid = false
+			issues = append(issues,
+				IntegrityIssue{Kind: issueMissingKeyIndex, Name: name, Member: cloneBytes(member), Detail: "score entry has no secondary key index"},
+				IntegrityIssue{Kind: issueMismatchedScore, Name: name, Member: cloneBytes(member), Key: joinScoreMember(entry.score, member), Detail: "secondary score differs from primary score"},
+			)
+		}
+		delete(secondary, memberKey)
+	}
+
+	// Remaining valid secondary entries are orphans. Walk their original cursor
+	// order instead of ranging over the map so IntegrityReport remains stable.
+	for _, memberKey := range secondaryOrder {
+		entry, ok := secondary[memberKey]
+		if !ok {
+			continue
+		}
+		zr.MissingScoreIndex++
+		zr.Valid = false
+		issues = append(issues, IntegrityIssue{
+			Kind:   issueMissingScoreIndex,
+			Name:   name,
+			Member: BS(memberKey),
+			Key:    joinScoreMember(entry.score, []byte(memberKey)),
+			Detail: "secondary index has no primary score entry",
+		})
+	}
+
 	return zr, issues, nil
 }
 
@@ -276,15 +374,21 @@ func repairIntegrityTx(tx *Tx, before IntegrityReport, opts RepairOptions) (int,
 			return repaired, dropped, err
 		}
 
-		// Read the primary score map completely before changing either bucket.
-		// This avoids cursor invalidation and makes repair deterministic even
-		// when malformed values are present.
-		type scoreEntry struct {
-			member BS
-			score  BS
+		// Rebuild the secondary index from the primary member->score map. The
+		// two buckets are independent, so the score cursor remains valid while
+		// the key-index bucket is cleared and repopulated. This avoids keeping
+		// an O(N) temporary slice of copied score entries in memory.
+		if err := clearBucket(tx, keyBucket); err != nil {
+			return repaired, dropped, err
 		}
-		validEntries := make([]scoreEntry, 0, scoreBucket.Stats().KeyN)
-		invalidMembers := make([]BS, 0)
+
+		// Malformed primary scores require an explicit destructive option. We
+		// cannot safely delete them while iterating the same bucket, so collect
+		// only malformed member keys; valid entries are written directly.
+		var invalidMembers [][]byte
+		if opts.DropInvalidScores {
+			invalidMembers = make([][]byte, 0)
+		}
 		c := scoreBucket.Cursor()
 		for member, score := c.First(); member != nil; member, score = c.Next() {
 			if len(score) != uint64EncodedLen {
@@ -294,11 +398,10 @@ func repairIntegrityTx(tx *Tx, before IntegrityReport, opts RepairOptions) (int,
 				invalidMembers = append(invalidMembers, cloneBytes(member))
 				continue
 			}
-			validEntries = append(validEntries, scoreEntry{member: cloneBytes(member), score: cloneBytes(score)})
-		}
-
-		if err := clearBucket(tx, keyBucket); err != nil {
-			return repaired, dropped, err
+			if err := keyBucket.Put(joinScoreMember(score, member), nil); err != nil {
+				return repaired, dropped, err
+			}
+			repaired++
 		}
 		for _, member := range invalidMembers {
 			if err := scoreBucket.Delete(member); err != nil {
@@ -306,14 +409,39 @@ func repairIntegrityTx(tx *Tx, before IntegrityReport, opts RepairOptions) (int,
 			}
 			dropped++
 		}
-		for _, entry := range validEntries {
-			if err := keyBucket.Put(Bconcat(entry.score, entry.member), nil); err != nil {
-				return repaired, dropped, err
-			}
-			repaired++
-		}
 	}
 	return repaired, dropped, nil
+}
+
+// cursorHasScoreMember checks for an exact score||member index without
+// allocating a composite key. Since all ZSet index keys begin with the fixed
+// eight-byte score, seeking the score finds the first member for that score.
+func cursorHasScoreMember(c *bolt.Cursor, score, member []byte) bool {
+	if c == nil || len(score) != uint64EncodedLen {
+		return false
+	}
+
+	// Seek(score) positions at the first index entry for this score, not at
+	// an arbitrary member. Multiple members may legitimately share the same
+	// score, so checking only the first cursor result causes false
+	// missing_key_index reports. Walk the contiguous score range and compare
+	// the member suffix without allocating a composite score||member key.
+	for k, _ := c.Seek(score); k != nil; k, _ = c.Next() {
+		if len(k) < uint64EncodedLen || !bytes.Equal(k[:uint64EncodedLen], score) {
+			return false
+		}
+		if bytes.Equal(k[uint64EncodedLen:], member) {
+			return true
+		}
+	}
+	return false
+}
+
+func joinScoreMember(score, member []byte) []byte {
+	out := make([]byte, uint64EncodedLen+len(member))
+	copy(out, score)
+	copy(out[uint64EncodedLen:], member)
+	return out
 }
 
 func ensureZSetBucketsForRepair(tx *Tx, name string) (*bolt.Bucket, *bolt.Bucket, error) {

@@ -196,3 +196,59 @@ func TestCloseWaitsForManagedOperation(t *testing.T) {
 		t.Fatalf("View after Close = %v, want %v", err, ErrDatabaseClosed)
 	}
 }
+
+func TestZscanReturnedSlicesDoNotAliasEachOther(t *testing.T) {
+	o := DefaultOptions()
+	o.Maintenance.Enabled = false
+	db, err := OpenWithOptions(t.TempDir()+"/zscan-alias.db", &o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := db.ZSet("z", []byte("member"), 123); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ZSet("z", []byte("member-2"), 123); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.View(func(tx *Tx) error {
+		r := db.Zscan(tx, "z", nil, I2b(0), 10)
+		if r.Err != nil {
+			return r.Err
+		}
+		if len(r.Data) != 4 {
+			t.Fatalf("data len=%d, want 4", len(r.Data))
+		}
+		if &r.Data[0][0] == &r.Data[1][0] {
+			t.Fatal("member and score slices unexpectedly alias at the same address")
+		}
+		if got := r.Data[0].String(); got != "member" {
+			t.Fatalf("member=%q", got)
+		}
+		if got := r.Data[1].Uint64(); got != 123 {
+			t.Fatalf("score=%d", got)
+		}
+		// V5.15 uses a shared copy arena. Returned slices must not have spare
+		// capacity into neighboring results, otherwise append could mutate a
+		// different result entry.
+		if cap(r.Data[0]) != len(r.Data[0]) || cap(r.Data[1]) != len(r.Data[1]) {
+			t.Fatalf("unexpected result capacities: member=%d/%d score=%d/%d", cap(r.Data[0]), len(r.Data[0]), cap(r.Data[1]), len(r.Data[1]))
+		}
+		if got := r.Data[2].String(); got != "member-2" {
+			t.Fatalf("second member=%q", got)
+		}
+		if got := r.Data[3].Uint64(); got != 123 {
+			t.Fatalf("second score=%d", got)
+		}
+		// Appending to one returned slice must not overwrite a neighboring
+		// result, even though the implementation shares an internal arena.
+		r.Data[0] = append(r.Data[0], 'x')
+		if got := r.Data[2].String(); got != "member-2" {
+			t.Fatalf("second member changed after append: %q", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
