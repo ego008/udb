@@ -1,0 +1,111 @@
+package udb
+
+import (
+	"sync"
+
+	bolt "go.etcd.io/bbolt"
+)
+
+// lifecycle coordinates UDB operations that may replace or close the
+// underlying bbolt.DB. It is intentionally not an RWMutex around every
+// transaction: bbolt already provides transaction-level concurrency.
+//
+// State transitions:
+//
+//	normal -> quiescing -> normal       (maintenance/replacement)
+//	normal -> quiescing -> closed       (Close)
+//
+// begin/end are deliberately short critical sections. The active operation
+// count remains held for the duration of the managed transaction, but the
+// mutex itself is not held during that transaction.
+type lifecycle struct {
+	mu        sync.Mutex
+	cond      *sync.Cond
+	active    int
+	quiescing bool
+	closed    bool
+}
+
+func (l *lifecycle) init() {
+	if l.cond == nil {
+		l.cond = sync.NewCond(&l.mu)
+	}
+}
+
+func (l *lifecycle) begin(db *DB) (*bolt.DB, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.init()
+
+	d := db.DB
+	if l.closed || d == nil {
+		return nil, ErrDatabaseClosed
+	}
+	for l.quiescing {
+		l.cond.Wait()
+		d = db.DB
+		if l.closed || d == nil {
+			return nil, ErrDatabaseClosed
+		}
+	}
+	l.active++
+	return d, nil
+}
+
+func (l *lifecycle) end() {
+	l.mu.Lock()
+	l.active--
+	if l.active == 0 {
+		l.init()
+		l.cond.Broadcast()
+	}
+	l.mu.Unlock()
+}
+
+// quiesce prevents new managed operations and waits for all currently active
+// managed operations to finish. The caller owns the quiesced state and must
+// call resume() unless it transitions the lifecycle to closed.
+func (l *lifecycle) quiesce() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.init()
+	if l.closed {
+		return ErrDatabaseClosed
+	}
+	// Lifecycle operations themselves are serialized. This prevents Close and
+	// CompactAndReplace from both entering the quiescent section at once.
+	for l.quiescing {
+		l.cond.Wait()
+		if l.closed {
+			return ErrDatabaseClosed
+		}
+	}
+	l.quiescing = true
+	for l.active > 0 {
+		l.cond.Wait()
+	}
+	return nil
+}
+
+func (l *lifecycle) resume() {
+	l.mu.Lock()
+	l.quiescing = false
+	l.init()
+	l.cond.Broadcast()
+	l.mu.Unlock()
+}
+
+func (l *lifecycle) markClosed() {
+	l.mu.Lock()
+	l.closed = true
+	l.quiescing = false
+	l.init()
+	l.cond.Broadcast()
+	l.mu.Unlock()
+}
+
+func (l *lifecycle) isClosed() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.closed
+}

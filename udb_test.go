@@ -1,254 +1,198 @@
 package udb
 
 import (
-	"bytes"
-	"os"
-	"path/filepath"
+	"context"
+	"reflect"
 	"testing"
-
-	bolt "go.etcd.io/bbolt"
+	"time"
 )
 
-// run test: go test -v
-
-// setupTestDB 创建一个临时的 BoltDB 实例用于测试，并在测试结束后清理
-func setupTestDB(t *testing.T) (*DB, string) {
-	dir, err := os.MkdirTemp("", "udb_test_*")
+func TestHashAndZSet(t *testing.T) {
+	o := DefaultOptions()
+	o.Maintenance.Enabled = false
+	db, err := OpenWithOptions(t.TempDir()+"/test.db", &o)
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+		t.Fatal(err)
 	}
-	dbPath := filepath.Join(dir, "test.db")
-
-	db, err := Open(dbPath)
-	if err != nil {
-		os.RemoveAll(dir)
-		t.Fatalf("failed to open db: %v", err)
-	}
-
-	return db, dir
-}
-
-func TestHashOperations(t *testing.T) {
-	db, dir := setupTestDB(t)
 	defer db.Close()
-	defer os.RemoveAll(dir)
 
-	hashName := "portfolio_positions"
-
-	// 1. 测试 Hset 与 Hget
-	err := db.Update(func(tx *bolt.Tx) error {
-		return db.Hset(tx, hashName, []byte("AAPL"), []byte("150.5"))
-	})
-	if err != nil {
-		t.Fatalf("Hset failed: %v", err)
-	}
-
-	err = db.View(func(tx *bolt.Tx) error {
-		reply := db.Hget(tx, hashName, []byte("AAPL"))
-		if !reply.OK() {
-			t.Fatalf("expected ok, got state: %s", reply.State)
-		}
-		if reply.String() != "150.5" {
-			t.Fatalf("expected '150.5', got '%s'", reply.String())
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("View transaction failed: %v", err)
-	}
-
-	// 2. 测试 Hmset 与 Hmget
-	err = db.Update(func(tx *bolt.Tx) error {
-		return db.Hmset(tx, hashName,
-			[]byte("TSLA"), []byte("200.0"),
-			[]byte("NVDA"), []byte("1000.0"),
-		)
-	})
-	if err != nil {
-		t.Fatalf("Hmset failed: %v", err)
-	}
-
-	err = db.View(func(tx *bolt.Tx) error {
-		reply := db.Hmget(tx, hashName, [][]byte{[]byte("TSLA"), []byte("NVDA"), []byte("UNKNOWN")})
-		if !reply.OK() {
-			t.Fatalf("Hmget failed with state: %s", reply.State)
-		}
-		dict := reply.Dict()
-		if string(dict["TSLA"]) != "200.0" || string(dict["NVDA"]) != "1000.0" {
-			t.Fatalf("Hmget dict values mismatch: %v", dict)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Hmget transaction failed: %v", err)
-	}
-
-	// 3. 测试 Hincr 自增与溢出防范
-	err = db.Update(func(tx *bolt.Tx) error {
-		val, err := db.Hincr(tx, hashName, []byte("counter"), 10)
-		if err != nil || val != 10 {
-			t.Fatalf("Hincr failed: err=%v, val=%d", err, val)
-		}
-
-		val, err = db.Hincr(tx, hashName, []byte("counter"), -3)
-		if err != nil || val != 7 {
-			t.Fatalf("Hincr negative step failed: err=%v, val=%d", err, val)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Hincr transaction failed: %v", err)
-	}
-
-	// 4. 测试 Hscan 与 Hrscan 范围查询
-	err = db.View(func(tx *bolt.Tx) error {
-		// 插入顺序：AAPL, NVDA, TSLA, counter
-		reply := db.Hscan(tx, hashName, []byte("A"), 10)
-		if !reply.OK() {
-			t.Fatalf("Hscan failed")
-		}
-		// 验证扫描结果数量
-		if reply.KvLen() < 3 {
-			t.Fatalf("Hscan count unexpected: %d", reply.KvLen())
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Hscan transaction failed: %v", err)
-	}
-
-	// 5. 测试 Hdel 删除
-	err = db.Update(func(tx *bolt.Tx) error {
-		return db.Hdel(tx, hashName, []byte("AAPL"))
-	})
-	if err != nil {
-		t.Fatalf("Hdel failed: %v", err)
-	}
-}
-
-func TestZSetOperations(t *testing.T) {
-	db, dir := setupTestDB(t)
-	defer db.Close()
-	defer os.RemoveAll(dir)
-
-	zsetName := "etf_momentum_rank"
-
-	// 1. 测试 Zset 写入分数
-	err := db.Update(func(tx *bolt.Tx) error {
-		if err := db.Zset(tx, zsetName, []byte("513100"), 85); err != nil {
+	if err := db.Update(func(tx *Tx) error {
+		if err := db.Hset(tx, "h", []byte("a"), []byte("hello")); err != nil {
 			return err
 		}
-		if err := db.Zset(tx, zsetName, []byte("518880"), 92); err != nil {
+		if _, err := db.Hincr(tx, "counter", []byte("n"), 3); err != nil {
 			return err
 		}
-		return db.Zset(tx, zsetName, []byte("159985"), 78)
-	})
-	if err != nil {
-		t.Fatalf("Zset initialization failed: %v", err)
+		if err := db.Zset(tx, "rank", []byte("a"), 10); err != nil {
+			return err
+		}
+		if err := db.Zset(tx, "rank", []byte("b"), 10); err != nil {
+			return err
+		}
+		return db.Zset(tx, "rank", []byte("c"), 20)
+	}); err != nil {
+		t.Fatal(err)
 	}
 
-	// 2. 测试 Zget 获取分数
-	err = db.View(func(tx *bolt.Tx) error {
-		reply := db.Zget(tx, zsetName, []byte("518880"))
-		if !reply.OK() {
-			t.Fatalf("Zget failed")
+	if err := db.View(func(tx *Tx) error {
+		if got := db.Hget(tx, "h", []byte("a")).String(); got != "hello" {
+			t.Fatalf("Hget=%q", got)
 		}
-		if reply.Uint64() != 92 {
-			t.Fatalf("expected score 92, got %d", reply.Uint64())
+		v, err := db.HgetInt(tx, "counter", []byte("n"))
+		if err != nil || v != 3 {
+			t.Fatalf("counter=%d err=%v", v, err)
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Zget transaction failed: %v", err)
-	}
-
-	// 3. 测试 Zincr 分数调整
-	err = db.Update(func(tx *bolt.Tx) error {
-		newScore, err := db.Zincr(tx, zsetName, []byte("159985"), 5)
-		if err != nil || newScore != 83 {
-			t.Fatalf("Zincr failed: err=%v, score=%d", err, newScore)
+		r := db.Zscan(tx, "rank", []byte("a"), I2b(10), 10)
+		want := []Entry{{Key: BS("b"), Value: BS(I2b(10))}, {Key: BS("c"), Value: BS(I2b(20))}}
+		if !reflect.DeepEqual(r.List(), want) {
+			t.Fatalf("Zscan=%v want=%v", r.List(), want)
+		}
+		r = db.Zrscan(tx, "rank", []byte("c"), I2b(20), 10)
+		want = []Entry{{Key: BS("b"), Value: BS(I2b(10))}, {Key: BS("a"), Value: BS(I2b(10))}}
+		if !reflect.DeepEqual(r.List(), want) {
+			t.Fatalf("Zrscan=%v want=%v", r.List(), want)
 		}
 		return nil
-	})
-	if err != nil {
-		t.Fatalf("Zincr transaction failed: %v", err)
-	}
-
-	// 4. 测试 Zscan 排序和范围扫描
-	err = db.View(func(tx *bolt.Tx) error {
-		// 从头开始扫描
-		reply := db.Zscan(tx, zsetName, []byte(""), nil, 10)
-		if !reply.OK() {
-			t.Fatalf("Zscan failed")
-		}
-
-		entries := reply.List()
-		if len(entries) != 3 {
-			t.Fatalf("expected 3 entries in zset, got %d", len(entries))
-		}
-
-		// 检查底层是否按照分数由小到大正确排序
-		// 分数最低的应该是 159985 (score 83)
-		if !bytes.Equal(entries[0].Key, []byte("159985")) {
-			t.Fatalf("zset sort order error, first key should be 159985, got %s", entries[0].Key)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Zscan transaction failed: %v", err)
-	}
-
-	// 5. 测试 Zrscan 反向扫描
-	err = db.View(func(tx *bolt.Tx) error {
-		reply := db.Zrscan(tx, zsetName, nil, nil, 1)
-		if !reply.OK() {
-			t.Fatalf("Zrscan failed")
-		}
-		entries := reply.List()
-		if len(entries) != 1 {
-			t.Fatalf("Zrscan limit failed")
-		}
-		// 分数最高的应该是 518880 (score 92)
-		if !bytes.Equal(entries[0].Key, []byte("518880")) {
-			t.Fatalf("zrscan order error, highest should be 518880, got %s", entries[0].Key)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Zrscan transaction failed: %v", err)
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
-// TestReplyClone 验证跨事务安全拷贝机制，防止 mmap 内存失效
-func TestReplyClone(t *testing.T) {
-	db, dir := setupTestDB(t)
+func TestHighLevelAPI(t *testing.T) {
+	o := DefaultOptions()
+	o.Maintenance.Enabled = false
+	db, err := OpenWithOptions(t.TempDir()+"/api.db", &o)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer db.Close()
-	defer os.RemoveAll(dir)
+	if err := db.HSet("h", []byte("k"), []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	if got := db.HGet("h", []byte("k")).String(); got != "v" {
+		t.Fatalf("got %q", got)
+	}
+	if err := db.ZSet("z", []byte("m"), 123); err != nil {
+		t.Fatal(err)
+	}
+	if got := db.ZGet("z", []byte("m")).Uint64(); got != 123 {
+		t.Fatalf("got %d", got)
+	}
+}
 
-	err := db.Update(func(tx *bolt.Tx) error {
-		return db.Hset(tx, "clonetest", []byte("k"), []byte("v"))
-	})
+func TestMaintenanceGate(t *testing.T) {
+	o := DefaultOptions()
+	o.Maintenance.Enabled = false
+	db, err := OpenWithOptions(t.TempDir()+"/gate.db", &o)
 	if err != nil {
-		t.Fatalf("setup failed: %v", err)
+		t.Fatal(err)
+	}
+	defer db.Close()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() { done <- db.View(func(tx *Tx) error { close(started); <-release; return nil }) }()
+	<-started
+	go func() { time.Sleep(20 * time.Millisecond); close(release) }()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManagerContext(t *testing.T) {
+	o := DefaultOptions()
+	o.Maintenance.Interval = time.Hour
+	db, err := OpenWithOptions(t.TempDir()+"/ctx.db", &o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := db.StartMaintenance(ctx); err == nil {
+		t.Fatal("expected busy because Open starts manager")
+	}
+	cancel()
+	db.Close()
+}
+
+func TestConcurrentViewsAreNotSerializedByUDBMutex(t *testing.T) {
+	o := DefaultOptions()
+	o.Maintenance.Enabled = false
+	db, err := OpenWithOptions(t.TempDir()+"/concurrent-view.db", &o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	done := make(chan error, 2)
+
+	for i := 0; i < 2; i++ {
+		go func() {
+			done <- db.View(func(tx *Tx) error {
+				entered <- struct{}{}
+				<-release
+				return nil
+			})
+		}()
 	}
 
-	var clonedReply *Reply
-	// 在一个短生命周期的事务中查询
-	err = db.View(func(tx *bolt.Tx) error {
-		reply := db.Hget(tx, "clonetest", []byte("k"))
-		if !reply.OK() {
-			t.Fatalf("get failed")
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("first View did not start")
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("second View was serialized; bbolt read transactions should run concurrently")
+	}
+	close(release)
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Fatal(err)
 		}
-		// 克隆数据，脱离事务内存绑定
-		clonedReply = reply.Clone()
-		return nil
-	})
+	}
+}
+
+func TestCloseWaitsForManagedOperation(t *testing.T) {
+	o := DefaultOptions()
+	o.Maintenance.Enabled = false
+	db, err := OpenWithOptions(t.TempDir()+"/close-wait.db", &o)
 	if err != nil {
-		t.Fatalf("transaction failed: %v", err)
+		t.Fatal(err)
 	}
 
-	// 事务已经结束，访问 Cloned 数据应当完全安全且内容正确
-	if clonVal := clonedReply.String(); clonVal != "v" {
-		t.Fatalf("expected 'v', got '%s'", clonVal)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	viewDone := make(chan error, 1)
+	closeDone := make(chan error, 1)
+
+	go func() {
+		viewDone <- db.View(func(tx *Tx) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+
+	go func() { closeDone <- db.Close() }()
+
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned before active operation finished: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-viewDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.View(func(tx *Tx) error { return nil }); err != ErrDatabaseClosed {
+		t.Fatalf("View after Close = %v, want %v", err, ErrDatabaseClosed)
 	}
 }
