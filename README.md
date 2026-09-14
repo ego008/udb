@@ -280,3 +280,74 @@ go test -run '^$' -fuzz FuzzV511RandomOperationStream -fuzztime=30s
 V5.14 adds stable `BenchmarkV514*` benchmark names and profiling instructions
 in `PERFORMANCE.md`. The profiling benchmarks reuse the established workloads
 and do not alter the database implementation or persistence semantics.
+
+## V5.19 WritePipeline
+
+For applications with many concurrent writers, use `WritePipeline` to amortize
+bbolt's durable transaction/commit cost:
+
+```go
+pipeline, err := db.NewWritePipeline(udb.WritePipelineOptions{
+    MaxBatchSize: 100,
+    MaxWait:      5 * time.Millisecond,
+    QueueSize:    1024,
+})
+if err != nil {
+    return err
+}
+defer pipeline.Close()
+
+if err := pipeline.HSet("users", []byte("42"), []byte("alice")); err != nil {
+    return err
+}
+if err := pipeline.ZSet("leaderboard", []byte("42"), 100); err != nil {
+    return err
+}
+if err := pipeline.Flush(); err != nil {
+    return err
+}
+```
+
+`HSet`/`ZSet` are synchronous from the caller's perspective, but concurrent
+callers share the bounded queue and are batched by one writer transaction.
+`Flush` is an ordered barrier. `Close` rejects new requests and drains all
+already accepted requests. V5.19 deliberately does not coalesce or reorder
+writes.
+
+> Shutdown order: applications should call `WritePipeline.Close()` before
+> `DB.Close()`. The pipeline owns a writer goroutine and drains its accepted
+> requests before returning from `Close()`.
+
+## V5.20 Async WritePipeline
+
+V5.20 keeps the V5.19 synchronous pipeline APIs and adds asynchronous submission:
+
+```go
+p, err := db.NewWritePipeline(WritePipelineOptions{
+    MaxBatchSize: 100,
+    MaxWait:      5 * time.Millisecond,
+    QueueSize:    1024,
+})
+if err != nil { /* handle */ }
+defer p.Close()
+
+futures := make([]*WriteFuture, 0, 100)
+for i := 0; i < 100; i++ {
+    f, err := p.HSetAsync("users", []byte(fmt.Sprintf("u-%d", i)), []byte("ok"))
+    if err != nil { /* handle */ }
+    futures = append(futures, f)
+}
+for _, f := range futures {
+    if err := f.Wait(); err != nil { /* handle */ }
+}
+```
+
+`HSetAsync`/`ZSetAsync`/`HDelAsync`/`ZDelAsync` return after the request is accepted by the bounded queue. `WriteFuture.Wait()` waits for the actual transaction result. `WaitContext` can stop waiting without cancelling an already accepted write.
+
+The pipeline still executes requests in submission order and does not coalesce or reorder operations. A bbolt transaction is the atomicity unit: if any operation in a batch fails, the transaction rolls back and every future in that batch receives the transaction error.
+
+Applications should close the pipeline before closing the database:
+
+```text
+producers -> bounded queue -> batch collector -> single writer -> one bbolt Update
+```

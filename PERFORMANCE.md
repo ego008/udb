@@ -114,3 +114,49 @@ The acceptance questions are:
 Do not optimize further from a single `ns/op` result. Use `benchstat` and CPU,
 heap, mutex and block profiles on the same machine, Go version, bbolt version,
 fixture and benchmark command.
+
+## V5.19 WritePipeline
+
+V5.19 moves write optimization from individual API calls to transaction
+amortization under concurrent load:
+
+```text
+producer 1 ─┐
+producer 2 ─┼─> bounded queue ─> single writer ─> one bbolt Update per batch
+producer N ─┘
+```
+
+`WritePipeline` is intentionally conservative. Requests are assigned a
+monotonic submission sequence while holding the submission gate, so concurrent
+producers cannot overtake one another. The first request starts the batch wait
+timer; the writer flushes when `MaxBatchSize` is reached, `MaxWait` expires, a
+`Flush` barrier is encountered, or the queue is closed.
+
+The pipeline does **not** coalesce operations in V5.19. For example,
+`HSet(k,v1) -> HDel(k) -> HSet(k,v2)` remains exactly that sequence.
+
+Recommended starting points from the V5.18 measurements:
+
+- durable workloads: `MaxBatchSize=100`, `MaxWait=5ms`, `QueueSize=1024`
+- higher-throughput ingestion: test 500-1000 item batches before going larger
+- keep normal `NoSync=false`; `NoSync` is a durability trade-off, not a normal
+  performance switch
+
+Benchmarks:
+
+```bash
+go test -run '^$' -bench '^BenchmarkV519' -benchmem -count=5
+go test -race ./...
+```
+
+## V5.20 Async WritePipeline
+
+V5.20 adds asynchronous submission on top of the V5.19 bounded queue. The synchronous methods remain available; the new `*Async` methods separate request admission from completion so a producer can submit many requests before waiting for their results.
+
+Recommended benchmark comparison:
+
+```bash
+go test -run '^$' -bench '^BenchmarkV520' -benchmem -count=5
+```
+
+Important metrics are `items/s` for batched workloads and `ops/s` for producer throughput. Compare async workloads with the existing direct and `HSetBatch` benchmarks. Durable throughput remains constrained by bbolt's serialized write transaction and sync/commit costs; asynchronous batching reduces the number of commits per application request but does not make bbolt support concurrent durable write transactions.

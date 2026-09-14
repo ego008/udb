@@ -49,7 +49,15 @@ func TestV518ZSetBatchAtomicValidation(t *testing.T) {
 	if err := db.ZSetBatch("atomic-v518", entries); err == nil {
 		t.Fatal("expected validation error")
 	}
-	if r := db.ZGet("atomic-v518", []byte("ok")); r.Err != ErrBucketNotFound && r.Err != ErrKeyNotFound {
+	r := db.ZGet("atomic-v518", []byte("ok"))
+	// A failed batch must not leave any committed member. Depending on the
+	// read API, a missing bucket/key is represented by State with a nil Err.
+	// Both states are valid after the transaction is rolled back.
+	if r.Err != nil {
+		if r.Err != ErrBucketNotFound && r.Err != ErrKeyNotFound {
+			t.Fatalf("unexpected error after validation failure: %v state=%s", r.Err, r.State)
+		}
+	} else if r.State != bucketNotFound && r.State != keyNotFound {
 		t.Fatalf("partial write after validation failure: err=%v state=%s", r.Err, r.State)
 	}
 }
