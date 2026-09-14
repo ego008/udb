@@ -1,5 +1,13 @@
 # Changelog
 
+## V5.6.2
+
+- Strengthened crash-recovery fallback when the recovery journal is missing or corrupt.
+- A valid formal database remains authoritative whenever it exists.
+- Journal-less recovery now refuses to guess when both a valid compact temporary file and a valid backup exist; this prevents silent rollback/data loss.
+- Added recovery state-matrix tests for ambiguous artifacts, corrupt journals, single valid artifact recovery, and formal-database precedence.
+- Preserved Hash/ZSet logical snapshot and bbolt integrity checks across recovery paths.
+
 ## V5.6
 
 ### Crash consistency and recovery
@@ -27,3 +35,9 @@
 - Added rollback handling for failures before/after backup, replacement, reopen, and post-check stages.
 - Added logical snapshot, backup/rollback, ZSet repair, mixed pressure, lifecycle-race, and close/reopen persistence tests.
 - `CompactTo` now explicitly rejects an existing directory destination.
+
+## V5.6.3
+
+- Fixed journal-less recovery artifact discovery to recognize both `.compact.<suffix>` and `.compact-<suffix>` temporary artifact names.
+- Tightened journal-less recovery: if more than one fully valid recovery artifact exists, recovery now fails closed instead of selecting by mtime.
+- Preserved the rule that a valid formal database always wins over stale/corrupt recovery artifacts.

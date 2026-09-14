@@ -112,7 +112,14 @@ func recoveryArtifacts(path string) (temps, backups []artifactCandidate) {
 			continue
 		}
 		name := e.Name()
-		if !strings.HasPrefix(name, base+".compact.") && !strings.HasPrefix(name, base+".backup-") {
+		// Accept both the production form (".compact.<timestamp>.tmp") and
+		// older/test crash-artifact forms such as ".compact-crash.tmp".
+		// Recovery must recognize artifacts by the stable namespace prefix, not
+		// by one particular separator after "compact".
+		isTemp := strings.HasPrefix(name, base+".compact.") ||
+			strings.HasPrefix(name, base+".compact-")
+		isBackup := strings.HasPrefix(name, base+".backup-")
+		if !isTemp && !isBackup {
 			continue
 		}
 		info, err := e.Info()
@@ -120,7 +127,7 @@ func recoveryArtifacts(path string) (temps, backups []artifactCandidate) {
 			continue
 		}
 		c := artifactCandidate{path: filepath.Join(dir, name), modTime: info.ModTime().UnixNano()}
-		if strings.HasPrefix(name, base+".compact.") {
+		if isTemp {
 			temps = append(temps, c)
 		} else {
 			backups = append(backups, c)
@@ -161,8 +168,8 @@ func promoteRecoveryArtifact(src, dst string) error {
 // recoverInterruptedCompaction is deliberately safe under journal corruption:
 // if the formal database is already valid, it wins and a stale/corrupt journal
 // cannot prevent the database from opening. If the formal file is absent or
-// invalid, the journal is preferred; if the journal itself is unavailable, a
-// validated newest compact temp is preferred over a validated newest backup.
+// invalid, the journal is authoritative when valid; if the journal itself is
+// unavailable, recovery only promotes an unambiguous artifact class.
 func recoverInterruptedCompaction(path string, opts Options) error {
 	jpath := recoveryJournalPath(path)
 	formalValid := validBoltFile(path, opts)
@@ -209,21 +216,47 @@ func recoverInterruptedCompaction(path string, opts Options) error {
 	// only compaction/backup naming patterns and promote only a fully checked
 	// bbolt file. This makes startup recovery robust to arbitrary process death
 	// around the journal rename boundary.
+	//
+	// IMPORTANT: when the journal is unavailable, a valid temp and a valid
+	// backup are intentionally treated as ambiguous. Without the journal there
+	// is no durable fact telling us which artifact belongs to the latest
+	// compaction attempt. Choosing one merely because it is a temp (or because
+	// its mtime is newer) can silently roll back committed user data. In that
+	// situation fail closed instead of guessing.
 	temps, backups := recoveryArtifacts(path)
+	validTemps := make([]artifactCandidate, 0, len(temps))
+	validBackups := make([]artifactCandidate, 0, len(backups))
 	for _, c := range temps {
 		if validBoltFile(c.path, opts) {
-			if err := promoteRecoveryArtifact(c.path, path); err == nil && validBoltFile(path, opts) {
-				removeRecoveryJournal(path)
-				return nil
-			}
+			validTemps = append(validTemps, c)
 		}
 	}
 	for _, c := range backups {
 		if validBoltFile(c.path, opts) {
-			if err := promoteRecoveryArtifact(c.path, path); err == nil && validBoltFile(path, opts) {
-				removeRecoveryJournal(path)
-				return nil
-			}
+			validBackups = append(validBackups, c)
+		}
+	}
+
+	// Without a usable journal, every valid artifact is an independent
+	// candidate. More than one valid candidate is ambiguous, including
+	// multiple temps or multiple backups; mtime alone is not a durable
+	// ordering guarantee. Only exactly one valid artifact may be promoted.
+	if len(validTemps)+len(validBackups) > 1 {
+		return fmt.Errorf(
+			"udb: ambiguous recovery for %q: %d valid compact artifacts exist without a usable journal",
+			path, len(validTemps)+len(validBackups),
+		)
+	}
+	if len(validTemps) == 1 {
+		if err := promoteRecoveryArtifact(validTemps[0].path, path); err == nil && validBoltFile(path, opts) {
+			removeRecoveryJournal(path)
+			return nil
+		}
+	}
+	if len(validBackups) == 1 {
+		if err := promoteRecoveryArtifact(validBackups[0].path, path); err == nil && validBoltFile(path, opts) {
+			removeRecoveryJournal(path)
+			return nil
 		}
 	}
 

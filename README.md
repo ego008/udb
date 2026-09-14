@@ -2,6 +2,19 @@
 
 UDB is a small Go embedded database wrapper built on `go.etcd.io/bbolt`, exposing Hash and ZSet primitives while keeping transaction ownership inside UDB.
 
+
+## Recovery safety (V5.6.2)
+
+Startup recovery follows a fail-closed rule:
+
+1. A valid formal database always wins over stale/corrupt recovery metadata.
+2. A valid journal is authoritative for choosing its compact temp or backup.
+3. If the journal is missing/corrupt, only a single unambiguous valid artifact class may be promoted.
+4. If both a valid compact temp and a valid backup exist without a usable journal, `Open` returns an error instead of guessing and risking silent rollback.
+5. Every promoted candidate is fully checked by bbolt before recovery succeeds.
+
+This deliberately favors data safety over availability when recovery metadata cannot establish ordering.
+
 ## V5.6 focus
 
 V5.6 upgrades compaction recovery from **process-alive rollback** to a **crash-consistency protocol**:

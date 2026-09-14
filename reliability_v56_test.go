@@ -292,3 +292,209 @@ func TestV56OpenNewDatabaseWithoutRecoveryArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestV56AmbiguousArtifactsFailClosed verifies the most important recovery
+// safety rule: when the journal is unavailable, a valid compact temp and a
+// valid backup cannot be ordered reliably. Recovery must refuse to guess
+// rather than silently restoring an older snapshot.
+func TestV56AmbiguousArtifactsFailClosed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ambiguous.db")
+	o := DefaultOptions()
+	o.Maintenance.Enabled = false
+
+	db, err := OpenWithOptions(path, &o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedReliabilityData(t, db)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	backup := path + ".backup-crash"
+	tmp := path + ".compact-crash.tmp"
+	if err := copyFile(path, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyFile(path, tmp); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+
+	// Deliberately remove the journal: this is the unsafe state in which the
+	// implementation must not guess between two independently valid artifacts.
+	_, err = OpenWithOptions(path, &o)
+	if err == nil {
+		t.Fatal("ambiguous recovery unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "ambiguous recovery") {
+		t.Fatalf("unexpected ambiguous recovery error: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ambiguous recovery unexpectedly created formal db: %v", err)
+	}
+}
+
+// TestV56AmbiguousArtifactsWithCorruptJournalAlsoFailClosed covers the case
+// where the journal exists but is torn/corrupt. A corrupt journal provides no
+// trustworthy ordering information, so the same no-guessing rule applies.
+func TestV56AmbiguousArtifactsWithCorruptJournalAlsoFailClosed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ambiguous-corrupt-journal.db")
+	o := DefaultOptions()
+	o.Maintenance.Enabled = false
+
+	db, err := OpenWithOptions(path, &o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedReliabilityData(t, db)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := copyFile(path, path+".backup-crash"); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyFile(path, path+".compact-crash.tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recoveryJournalPath(path), []byte(`{"version":1,"source_path":`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = OpenWithOptions(path, &o)
+	if err == nil {
+		t.Fatal("corrupt-journal ambiguous recovery unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "ambiguous recovery") {
+		t.Fatalf("unexpected corrupt-journal recovery error: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ambiguous recovery unexpectedly created formal db: %v", err)
+	}
+}
+
+// TestV56MissingJournalSingleValidArtifactMatrix exercises the conservative
+// journal-less fallback for the two non-ambiguous cases: exactly one valid
+// artifact class exists. Corrupt artifacts in the other class are ignored.
+func TestV56MissingJournalSingleValidArtifactMatrix(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		makeTemp     bool
+		makeBackup   bool
+		corruptOther bool
+	}{
+		{name: "temp-only", makeTemp: true},
+		{name: "backup-only", makeBackup: true},
+		{name: "temp-valid-backup-corrupt", makeTemp: true, corruptOther: true},
+		{name: "backup-valid-temp-corrupt", makeBackup: true, corruptOther: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "matrix.db")
+			o := DefaultOptions()
+			o.Maintenance.Enabled = false
+
+			db, err := OpenWithOptions(path, &o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seedReliabilityData(t, db)
+			want := takeLogicalSnapshot(t, db, []string{"users", "counters"}, []string{"rank"})
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			tmp := path + ".compact-matrix.tmp"
+			backup := path + ".backup-matrix"
+			if tc.makeTemp {
+				if err := copyFile(path, tmp); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.makeBackup {
+				if err := copyFile(path, backup); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.corruptOther {
+				if tc.makeTemp {
+					if err := os.WriteFile(backup, []byte("corrupt"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err := os.WriteFile(tmp, []byte("corrupt"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+
+			recovered, err := OpenWithOptions(path, &o)
+			if err != nil {
+				t.Fatalf("journal-less recovery failed: %v", err)
+			}
+			got := takeLogicalSnapshot(t, recovered, []string{"users", "counters"}, []string{"rank"})
+			if !reflect.DeepEqual(want, got) {
+				t.Fatal("journal-less recovery changed logical snapshot")
+			}
+			if err := recovered.Check(); err != nil {
+				t.Fatal(err)
+			}
+			if err := recovered.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// TestV56ValidFormalDBAlwaysWins verifies that stale artifacts and even a
+// corrupt journal cannot override an already-valid formal database.
+func TestV56ValidFormalDBAlwaysWins(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "formal-wins.db")
+	o := DefaultOptions()
+	o.Maintenance.Enabled = false
+
+	db, err := OpenWithOptions(path, &o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedReliabilityData(t, db)
+	want := takeLogicalSnapshot(t, db, []string{"users", "counters"}, []string{"rank"})
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(path+".compact-stale.tmp", []byte("corrupt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyFile(path, path+".backup-stale"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recoveryJournalPath(path), []byte("partial"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered, err := OpenWithOptions(path, &o)
+	if err != nil {
+		t.Fatalf("valid formal DB was blocked by stale artifacts: %v", err)
+	}
+	defer recovered.Close()
+	got := takeLogicalSnapshot(t, recovered, []string{"users", "counters"}, []string{"rank"})
+	if !reflect.DeepEqual(want, got) {
+		t.Fatal("formal DB snapshot changed during recovery")
+	}
+	if _, err := os.Stat(recoveryJournalPath(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale journal remains: %v", err)
+	}
+}
