@@ -206,3 +206,25 @@ Targeted test:
 ```bash
 go test -run 'TestV510' -count=1
 ```
+
+## V5.11.1 Property-Based / Fuzz Testing
+
+V5.11.1 adds a test-only verification layer rather than changing the database API:
+
+- randomized Hash/ZSet operation sequences are checked against an independent reference model;
+- ZSet secondary-index corruption is injected and repaired repeatedly;
+- repair is followed by compact-and-replace and another integrity check;
+- `FuzzV511RandomOperationStream` accepts arbitrary byte streams and exercises the same logical operations;
+- fuzz cases are bounded to 300 operations and 64 MiB of database growth.
+
+Run the deterministic property tests with:
+
+```bash
+go test -run 'TestV511Property' -count=1
+```
+
+Run the fuzz target briefly with:
+
+```bash
+go test -run '^$' -fuzz FuzzV511RandomOperationStream -fuzztime=30s
+```

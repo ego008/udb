@@ -1,3 +1,10 @@
+## V5.11.1
+
+### Property test regression fix
+
+- Fixed the V5.11 compact/repair property test to compare the reference model against the correct `cycle-hash` and `cycle-zset` buckets.
+- Kept the production database implementation unchanged.
+
 # Changelog
 
 ## V5.10.1
@@ -109,3 +116,13 @@
 - Preserved compatibility with V5.6 journal recovery and conservative artifact scanning when the manifest is absent or corrupt.
 - Recovery manifest is atomically persisted with file and directory syncs.
 - Added V5.8 recovery-manifest regression tests for journal-less recovery, checksum mismatch, and corrupt-manifest fallback.
+
+## V5.11
+
+### Property-based and fuzz testing
+
+- Added a deterministic reference-model property test for randomized Hash/ZSet operation sequences.
+- Added repeated corruption → integrity check → repair → compact → integrity check cycles.
+- Added Go fuzz testing for arbitrary Hash/ZSet operation streams with logical model comparison.
+- Added bounded fuzz execution and database-growth guards to keep fuzz cases deterministic and safe.
+- The fuzz/property layer verifies application-visible state separately from UDB's physical index representation.
