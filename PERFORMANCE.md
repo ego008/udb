@@ -15,3 +15,19 @@ For pipeline profiling, compare `AvgQueueWaitLatency` with `AvgCommitLatency`: a
 high queue wait with normal commit latency indicates admission/batching pressure;
 high commit latency with low queue wait indicates the storage commit path is the
 limiting factor.
+
+## V5.24 read-path profiling
+
+Use the V5.24 benchmarks to compare per-operation managed transactions against grouped `ReadTransaction` workloads:
+
+```bash
+go test -run '^$' -bench '^BenchmarkV524' -benchmem -count=5
+```
+
+For CPU/allocation profiling:
+
+```bash
+go test -run '^$' -bench '^BenchmarkV524HGet100ReadTransaction$' -benchmem -cpuprofile hget.cpu -memprofile hget.mem
+```
+
+The primary expectation is that durable write performance remains unchanged while grouped reads amortize transaction admission and bbolt read-transaction setup across many lookups.

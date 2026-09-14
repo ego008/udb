@@ -88,3 +88,13 @@
 - Extended `ResetMetrics` to clear cumulative Snapshot metrics.
 - Added V5.23 regression tests for unified writes, batch metrics, pipeline queue latency, Snapshot metrics, and atomic rollback.
 - No changes to recovery format, integrity semantics, lifecycle model, or default bbolt durability.
+
+## V5.24
+
+- Added transaction-scoped `ReadEngine` for unified Hash/ZSet point reads and scans.
+- Added bucket lookup reuse within a read transaction without adding allocation cost to single point reads.
+- Refactored `Hget`, `HgetInt`, `Zget`, and `Zscore` through the common read core.
+- Added high-level `HGetInt`, `ZScore`, `HGetBatch`, and `ZGetBatch` helpers.
+- Added V5.24 read-engine correctness, ownership, batch-read, and scan regression tests.
+- Added read-path benchmarks comparing single transactions, grouped `ReadTransaction` calls, batch reads, and ZScan/ZScanEach.
+- No changes to recovery, integrity, Snapshot, lifecycle, or default durability semantics.

@@ -505,3 +505,9 @@ Database metrics now include logical Snapshot size and capture duration:
 These metrics describe the cost of creating an in-memory logical Snapshot; they do
 not represent the physical bbolt file size. `ResetMetrics` resets these cumulative
 Snapshot metrics as well.
+
+## V5.24 Read Engine
+
+V5.24 adds a transaction-scoped `ReadEngine` that unifies point reads and scan reads while keeping bbolt transactions private behind UDB's `Tx` type. It provides `HGet`, `HGetInt`, `ZGet`, `ZScore`, `HGetBatch`, `ZGetBatch`, `HScan`, `HRScan`, `ZScan`, `ZRScan`, and `ZScanEach` on a single read transaction.
+
+High-level `HGetInt`, `ZScore`, `HGetBatch`, and `ZGetBatch` helpers are also available. `ReadTransaction` remains the recommended way to group many reads into one consistent snapshot and avoid paying transaction-admission overhead for every individual lookup. Returned `Reply` bytes remain ownership-safe copies.
