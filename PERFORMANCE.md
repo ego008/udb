@@ -1,3 +1,30 @@
+## V5.16 CheckIntegrity memory optimization
+
+V5.15 removed the repeated secondary B-tree searches but retained two O(N)
+secondary-side structures: a `map[string]secondaryEntry` and `secondaryOrder`.
+The latter existed only to preserve deterministic orphan reporting. V5.16 removes
+`secondaryOrder`, reports remaining orphans with a final sequential secondary
+cursor scan, stores only the secondary score in the map, pre-sizes the map, and
+uses a private transaction-scoped zero-copy string view for member lookup keys.
+
+The zero-copy string helper is deliberately private and is never allowed to
+escape the active bbolt transaction. Public APIs continue to copy data where
+ownership requires it.
+
+Stable benchmarks:
+
+```text
+BenchmarkV516ZScan
+BenchmarkV516ZScanParallel
+BenchmarkV516CheckIntegrity
+BenchmarkV516RepairIntegrity
+BenchmarkV516ZScanEach
+```
+
+Compare V5.15 and V5.16 with the same machine, Go version, bbolt version and
+fixture size. The primary acceptance criterion is lower `B/op` and `allocs/op`
+for `BenchmarkV516CheckIntegrity` without regressions in integrity semantics.
+
 ## V5.15 profile-driven changes
 
 The V5.14 profiles identified two dominant production costs:

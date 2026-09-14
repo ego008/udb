@@ -1,3 +1,15 @@
+## V5.16 performance
+
+V5.16 continues the V5.15 profile-driven optimization of ZSet integrity
+checking. `CheckIntegrity` removes the redundant `secondaryOrder` allocation,
+uses a compact `map[string][]byte`, pre-sizes the map, and performs a final
+sequential scan for orphan indexes. Member lookup keys use a private
+transaction-scoped zero-copy string view. No public API or storage format
+changes.
+
+The zero-copy conversion is used only while the bbolt transaction is alive; it
+is never exposed by the public API.
+
 ## V5.15 performance
 
 V5.15 applies profile-driven optimization to ZSet integrity verification and scanning. `CheckIntegrity` no longer performs one secondary B-tree seek per primary member, and `Zscan` uses an arena to reduce per-result allocations. An internal transaction-scoped `zscanEach` path is available for synchronous zero-copy consumers.

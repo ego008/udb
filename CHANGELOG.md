@@ -1,3 +1,25 @@
+# Changelog
+
+## V5.16
+
+Profile-driven CheckIntegrity memory optimization based on V5.15 benchmarks.
+
+### CheckIntegrity
+
+- Removed the transaction-scoped `secondaryOrder` string slice used only to preserve orphan report order.
+- Orphan secondary indexes are now reported by a deterministic final sequential cursor scan.
+- Reduced the secondary map value from a struct to the secondary score slice.
+- Pre-sized the secondary map from the key-index bucket cardinality to reduce map growth.
+- Added a private transaction-scoped zero-copy `[]byte` to `string` conversion for map keys. The resulting strings never escape the bbolt transaction.
+- Kept the V5.15 sequential-scan algorithm; no per-member secondary `Cursor.Seek` was reintroduced.
+
+### Compatibility
+
+- No public API changes.
+- No storage-format changes.
+- ZScan/ZScanEach behavior remains unchanged.
+- Integrity issue accounting and deterministic report ordering are preserved.
+
 ## V5.15
 
 Performance optimization release driven by V5.14 CPU and allocation profiles.

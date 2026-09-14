@@ -92,3 +92,63 @@ func TestV515ZscanEach(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestV516IntegrityReportOrderWithoutSecondaryOrder(t *testing.T) {
+	db := openV57TestDB(t)
+	defer db.Close()
+
+	if err := db.ZSet("v516-order", []byte("a"), 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ZSet("v516-order", []byte("b"), 20); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ZSet("v516-order", []byte("c"), 30); err != nil {
+		t.Fatal(err)
+	}
+
+	// Leave three different logical problems: a missing secondary index for
+	// a, a wrong-score secondary index for b, and an orphan secondary index z.
+	// The final orphan scan must preserve physical cursor order and must run
+	// after all primary-side issues.
+	if err := db.Update(func(tx *Tx) error {
+		b := tx.bucket(bucketName(zetKeyPrefix, "v516-order"))
+		if b == nil {
+			return ErrBucketNotFound
+		}
+		if err := b.Delete(joinScoreMember(I2b(10), []byte("a"))); err != nil {
+			return err
+		}
+		if err := b.Delete(joinScoreMember(I2b(20), []byte("b"))); err != nil {
+			return err
+		}
+		return b.Put(joinScoreMember(I2b(99), []byte("b")), nil)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add a true orphan after the existing secondary entries.
+	if err := db.Update(func(tx *Tx) error {
+		b := tx.bucket(bucketName(zetKeyPrefix, "v516-order"))
+		return b.Put(joinScoreMember(I2b(100), []byte("z")), nil)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := db.CheckIntegrity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Consistent {
+		t.Fatal("expected inconsistency")
+	}
+	if len(r.Issues) != 4 {
+		t.Fatalf("expected 4 issues, got %d: %+v", len(r.Issues), r.Issues)
+	}
+	if r.Issues[len(r.Issues)-1].Kind != issueMissingScoreIndex {
+		t.Fatalf("expected final issue to be orphan secondary index, got %q", r.Issues[len(r.Issues)-1].Kind)
+	}
+	if string(r.Issues[len(r.Issues)-1].Member) != "z" {
+		t.Fatalf("expected orphan member z, got %q", r.Issues[len(r.Issues)-1].Member)
+	}
+}
