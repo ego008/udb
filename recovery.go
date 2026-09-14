@@ -79,6 +79,7 @@ func removeRecoveryJournal(sourcePath string) {
 	_ = os.Remove(path)
 	_ = os.Remove(path + ".tmp")
 	_ = syncDir(filepath.Dir(path))
+	removeRecoveryManifest(sourcePath)
 }
 
 func validBoltFile(path string, opts Options) bool {
@@ -173,6 +174,41 @@ func promoteRecoveryArtifact(src, dst string) error {
 func recoverInterruptedCompaction(path string, opts Options) error {
 	jpath := recoveryJournalPath(path)
 	formalValid := validBoltFile(path, opts)
+
+	// V5.8 adds a durable recovery manifest alongside the legacy journal.
+	// The manifest carries an operation identity and SHA-256 digests for
+	// recovery artifacts, so a valid manifest can distinguish artifacts even
+	// when the legacy journal is torn or missing. A valid formal DB still wins.
+	manifest, manifestErr := readRecoveryManifest(path)
+	if manifestErr == nil {
+		if formalValid {
+			if manifest.TempPath != "" && manifest.TempPath != path {
+				_ = os.Remove(manifest.TempPath)
+			}
+			removeRecoveryJournal(path)
+			return nil
+		}
+		if manifest.TempPath != "" && validManifestArtifact(manifest.TempPath, manifest.TempSHA256, opts) {
+			if err := promoteRecoveryArtifact(manifest.TempPath, path); err == nil && validManifestArtifact(path, manifest.TempSHA256, opts) {
+				removeRecoveryJournal(path)
+				return nil
+			}
+		}
+		if manifest.BackupPath != "" && validManifestArtifact(manifest.BackupPath, manifest.BackupSHA256, opts) {
+			if err := promoteRecoveryArtifact(manifest.BackupPath, path); err == nil && validManifestArtifact(path, manifest.BackupSHA256, opts) {
+				removeRecoveryJournal(path)
+				return nil
+			}
+		}
+		// A structurally valid manifest is stronger evidence than the legacy
+		// journal or directory scan. If its recorded artifact cannot be
+		// validated by checksum, fail closed rather than silently promoting a
+		// different or modified file.
+		return fmt.Errorf("udb: recovery manifest has no valid artifact for %q", path)
+	} else if !errors.Is(manifestErr, os.ErrNotExist) && formalValid {
+		removeRecoveryJournal(path)
+		return nil
+	}
 
 	data, readErr := os.ReadFile(jpath)
 	if readErr == nil {

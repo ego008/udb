@@ -132,3 +132,17 @@ report, err := db.RepairIntegrity(udb.RepairOptions{
 For compaction, `MaintenanceConfig.IntegrityAfterCompact` is enabled by default. `IntegrityBeforeCompact` can also be enabled when a full logical validation before compaction is desired.
 
 The design principle is: **detect automatically, repair deterministically, and never silently discard application data.**
+
+## V5.8 Recovery Manifest
+
+V5.8 在 V5.7 完整性检查基础上增加了 durable Recovery Manifest（恢复清单），与原有 recovery journal 并存：
+
+- 每次 `CompactAndReplace` 创建唯一 operation ID。
+- 恢复清单使用 write + fsync + atomic rename + directory fsync 持久化。
+- compact 临时数据库和 backup 会记录 SHA-256 摘要。
+- 启动恢复优先使用有效的 Recovery Manifest；正式数据库文件仍然拥有最高优先级。
+- manifest 指向的恢复文件如果 checksum 不匹配，默认 fail-closed，不再根据文件名或 mtime 猜测恢复对象。
+- manifest 损坏/缺失时仍兼容 V5.6 的 recovery journal 与 artifact scan 策略。
+- 成功恢复或成功完成 compact 后，manifest 与旧 journal 一起清理。
+
+设计目标仍然是：**宁可拒绝启动，也不因为恢复阶段的不确定性静默回滚用户数据。**

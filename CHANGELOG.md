@@ -65,3 +65,15 @@
 - Added rollback handling for failures before/after backup, replacement, reopen, and post-check stages.
 - Added logical snapshot, backup/rollback, ZSet repair, mixed pressure, lifecycle-race, and close/reopen persistence tests.
 - `CompactTo` now explicitly rejects an existing directory destination.
+
+## V5.8
+
+### Durable recovery manifest
+
+- Added a durable recovery manifest alongside the existing recovery journal.
+- Added per-compaction operation IDs and SHA-256 digests for compact/backup artifacts.
+- Startup recovery now prefers a valid manifest and verifies the recorded artifact digest before promotion.
+- A valid manifest with an unverifiable artifact fails closed instead of falling back to filename/mtime guessing.
+- Preserved compatibility with V5.6 journal recovery and conservative artifact scanning when the manifest is absent or corrupt.
+- Recovery manifest is atomically persisted with file and directory syncs.
+- Added V5.8 recovery-manifest regression tests for journal-less recovery, checksum mismatch, and corrupt-manifest fallback.

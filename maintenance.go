@@ -323,9 +323,16 @@ func (db *DB) CompactAndReplaceContext(ctx context.Context, cfg MaintenanceConfi
 	tmp := path + fmt.Sprintf(".compact.%d.tmp", time.Now().UnixNano())
 	_ = os.Remove(tmp)
 	journalPath := recoveryJournalPath(path)
-	journal := recoveryJournal{Version: 1, SourcePath: path, TempPath: tmp, KeepBackup: cfg.KeepBackup, Stage: "compacting"}
+	manifestPath := recoveryManifestPath(path)
+	operationID := fmt.Sprintf("%d", time.Now().UnixNano())
+	journal := recoveryJournal{Version: recoveryJournalVersion, SourcePath: path, TempPath: tmp, KeepBackup: cfg.KeepBackup, Stage: stageCompacting}
+	manifest := recoveryManifest{Version: recoveryManifestVersion, Operation: operationID, SourcePath: path, TempPath: tmp, KeepBackup: cfg.KeepBackup, Stage: stageCompacting}
 	if err := writeRecoveryJournal(journalPath, journal); err != nil {
 		return CompactResult{}, "", fmt.Errorf("udb: write recovery journal: %w", err)
+	}
+	if err := writeRecoveryManifest(manifestPath, manifest); err != nil {
+		removeRecoveryJournal(path)
+		return CompactResult{}, "", fmt.Errorf("udb: write recovery manifest: %w", err)
 	}
 
 	compactCfg := cfg
@@ -334,6 +341,14 @@ func (db *DB) CompactAndReplaceContext(ctx context.Context, cfg MaintenanceConfi
 	if err != nil {
 		cleanupRecoveryArtifacts(path, tmp, "", false)
 		return CompactResult{}, "", err
+	}
+	tempSHA, err := fileSHA256(tmp)
+	if err != nil {
+		return db.rollbackCompactFailure(path, tmp, "", false, fmt.Errorf("udb: hash compacted db: %w", err))
+	}
+	manifest.TempSHA256 = tempSHA
+	if err := writeRecoveryManifest(manifestPath, manifest); err != nil {
+		return db.rollbackCompactFailure(path, tmp, "", false, fmt.Errorf("udb: update recovery manifest: %w", err))
 	}
 
 	if err := injectCompactFault(cfg, FaultBeforeBackup); err != nil {
@@ -349,18 +364,32 @@ func (db *DB) CompactAndReplaceContext(ctx context.Context, cfg MaintenanceConfi
 		backup = uniqueBackupPath(path, cfg.BackupSuffix)
 		journal.BackupPath = backup
 	}
-	journal.Stage = "source_closed"
+	journal.Stage = stageSourceClosed
+	manifest.Stage = stageSourceClosed
 	if err := writeRecoveryJournal(journalPath, journal); err != nil {
 		return db.rollbackCompactFailure(path, tmp, backup, cfg.KeepBackup, fmt.Errorf("udb: update recovery journal: %w", err))
+	}
+	if err := writeRecoveryManifest(manifestPath, manifest); err != nil {
+		return db.rollbackCompactFailure(path, tmp, backup, cfg.KeepBackup, fmt.Errorf("udb: update recovery manifest: %w", err))
 	}
 
 	if cfg.KeepBackup {
 		if err := os.Rename(path, backup); err != nil {
 			return db.rollbackCompactFailure(path, tmp, backup, true, fmt.Errorf("udb: backup original: %w", err))
 		}
-		journal.Stage = "backup_created"
+		backupSHA, hashErr := fileSHA256(backup)
+		if hashErr != nil {
+			return db.rollbackCompactFailure(path, tmp, backup, true, fmt.Errorf("udb: hash backup db: %w", hashErr))
+		}
+		manifest.BackupPath = backup
+		manifest.BackupSHA256 = backupSHA
+		journal.Stage = stageBackupCreated
+		manifest.Stage = stageBackupCreated
 		if err := writeRecoveryJournal(journalPath, journal); err != nil {
 			return db.rollbackCompactFailure(path, tmp, backup, true, fmt.Errorf("udb: update recovery journal: %w", err))
+		}
+		if err := writeRecoveryManifest(manifestPath, manifest); err != nil {
+			return db.rollbackCompactFailure(path, tmp, backup, true, fmt.Errorf("udb: update recovery manifest: %w", err))
 		}
 		if err := syncDir(filepath.Dir(path)); err != nil {
 			return db.rollbackCompactFailure(path, tmp, backup, true, fmt.Errorf("udb: sync backup rename: %w", err))
@@ -386,9 +415,14 @@ func (db *DB) CompactAndReplaceContext(ctx context.Context, cfg MaintenanceConfi
 	if err := syncDir(filepath.Dir(path)); err != nil {
 		return db.rollbackCompactFailure(path, "", backup, cfg.KeepBackup, fmt.Errorf("udb: sync compacted db rename: %w", err))
 	}
-	journal.Stage = "replaced"
+	journal.Stage = stageReplaced
+	manifest.Stage = stageReplaced
+	manifest.TempPath = ""
 	if err := writeRecoveryJournal(journalPath, journal); err != nil {
 		return db.rollbackCompactFailure(path, "", backup, cfg.KeepBackup, fmt.Errorf("udb: update recovery journal: %w", err))
+	}
+	if err := writeRecoveryManifest(manifestPath, manifest); err != nil {
+		return db.rollbackCompactFailure(path, "", backup, cfg.KeepBackup, fmt.Errorf("udb: update recovery manifest: %w", err))
 	}
 	if err := injectCompactFault(cfg, FaultAfterReplace); err != nil {
 		return db.rollbackCompactFailure(path, "", backup, cfg.KeepBackup, err)
@@ -400,9 +434,13 @@ func (db *DB) CompactAndReplaceContext(ctx context.Context, cfg MaintenanceConfi
 	if err := db.reopenLocked(path); err != nil {
 		return db.rollbackCompactFailure(path, "", backup, cfg.KeepBackup, fmt.Errorf("udb: reopen compacted db: %w", err))
 	}
-	journal.Stage = "reopened"
+	journal.Stage = stageReopened
+	manifest.Stage = stageReopened
 	if err := writeRecoveryJournal(journalPath, journal); err != nil {
 		return db.rollbackCompactFailure(path, "", backup, cfg.KeepBackup, fmt.Errorf("udb: update recovery journal: %w", err))
+	}
+	if err := writeRecoveryManifest(manifestPath, manifest); err != nil {
+		return db.rollbackCompactFailure(path, "", backup, cfg.KeepBackup, fmt.Errorf("udb: update recovery manifest: %w", err))
 	}
 	if err := injectCompactFault(cfg, FaultAfterReopen); err != nil {
 		return db.rollbackCompactFailure(path, "", backup, cfg.KeepBackup, err)
