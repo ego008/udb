@@ -1,5 +1,15 @@
 # Changelog
 
+## V5.9
+
+### Recovery state audit
+
+- Added non-destructive `InspectRecovery(path, opts)` diagnostics.
+- Added explicit recovery decisions for clean, manifest, journal, single-artifact, fresh-database, and fail-closed states.
+- Added read-only validation and SHA-256 reporting for discovered compact/backup artifacts.
+- Added V5.9 regression tests for fresh state, formal-database precedence, ambiguous artifacts, and manifest checksum mismatch.
+- Preserved the fail-closed recovery policy: no heuristic promotion is performed when durable recovery evidence is ambiguous.
+
 ## V5.7.1
 
 ### Integrity & self-healing fix

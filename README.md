@@ -146,3 +146,22 @@ V5.8 在 V5.7 完整性检查基础上增加了 durable Recovery Manifest（恢�
 - 成功恢复或成功完成 compact 后，manifest 与旧 journal 一起清理。
 
 设计目标仍然是：**宁可拒绝启动，也不因为恢复阶段的不确定性静默回滚用户数据。**
+
+## V5.9 Recovery State Audit
+
+V5.9 adds a non-destructive recovery diagnostic API:
+
+```go
+report, err := udb.InspectRecovery(path, opts)
+```
+
+`InspectRecovery` never promotes, deletes, renames, or mutates recovery artifacts. It reports:
+
+- whether the formal database exists and passes bbolt integrity checks;
+- whether the legacy recovery journal exists and is structurally valid;
+- whether the V5.8 recovery manifest exists and is valid;
+- every discovered compact/backup artifact and its read-only bbolt validity;
+- SHA-256 for valid artifacts;
+- the deterministic recovery decision: `clean`, `manifest`, `journal`, `single_artifact`, `fresh_database`, or `fail_closed`.
+
+This is useful for startup diagnostics, monitoring, incident analysis, and testing crash-recovery state matrices without modifying the database. The recovery policy remains conservative: a valid formal database always wins, and ambiguous recovery states fail closed.
