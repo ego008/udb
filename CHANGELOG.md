@@ -157,6 +157,18 @@ V5.29 optimizes the hot read-planning path without introducing a cache, long-liv
 
 The design goal remains: **planner cost must stay smaller than the work it saves**.
 
+## V5.32 — Read Engine 4.0 / Point-First-Seek Adaptive Access Path
+
+- Added exported `ReadAccessPath` diagnostics: `Point`, `First`, `Seek`, and `Adaptive`.
+- Extended `ReadPlan` with `AccessPath` while preserving the existing `ReadPath` API.
+- Added `ReadPlannerOptions.CursorStart` to explicitly select First, Seek, or Adaptive cursor positioning; zero values normalize to Adaptive for backward compatibility.
+- Passed the planner's cursor-start decision through `ReadBatch`, `HGetMany`, and `ZScoreMany` execution instead of hard-coding Adaptive at the scan layer.
+- Reused the `ReadBatch` fast planner result to avoid a second homogeneous/sortedness pass.
+- Added V5.32 correctness coverage for access-path diagnostics, cursor-start overrides, zero-value normalization, duplicate keys, callback order, missing keys, and ZSet score semantics.
+- Added V5.32 benchmarks comparing Point, First, Seek, and Adaptive paths at head/middle workloads and measuring planner overhead.
+- Kept short-lived bbolt read transactions; no cache, reader pool, global read lock, or long-lived read transaction was introduced.
+- No changes to storage format, recovery, integrity, durability, or write semantics.
+
 ## V5.31 — Read Engine 3.0 / Adaptive Cursor Start
 
 - Added `ReadCursorStart` with `Adaptive`, `First`, and `Seek` modes.

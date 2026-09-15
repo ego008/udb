@@ -128,6 +128,47 @@ go test -run '^$' -bench '^BenchmarkV529HGetMany100Sorted$' -benchmem -cpuprofil
 
 All database population is performed before `ResetTimer`, so the measured profile represents the read workload rather than benchmark setup writes.
 
+## V5.32 Read Engine 4.0 / Point-First-Seek Access Paths
+
+V5.32 turns the physical read choice into an explicit diagnostic model:
+
+```text
+ReadAccessPoint
+ReadAccessFirst
+ReadAccessSeek
+ReadAccessAdaptive
+```
+
+The existing planner remains deterministic. It does not measure latency during
+normal reads because timing-based self-tuning would add synchronization and
+make results sensitive to bbolt mmap/cache state. Instead, `ReadPlan.AccessPath`
+records the selected path and `ReadPlannerOptions.CursorStart` can force a
+specific cursor start for controlled experiments.
+
+Recommended V5.32 benchmark matrix:
+
+```text
+batch:    10 / 32 / 100 / 1000
+position: head / middle / deep
+path:     Point / First / Seek / Adaptive
+```
+
+The direct comparison should include Point `Bucket.Get(key)` repeated N times,
+`Cursor.First()+Next()`, `Cursor.Seek(firstKey)+Next()`, and the bounded V5.31
+Adaptive cursor. Compare both latency and allocations. Keep benchmark setup
+outside `ResetTimer` so database population and bbolt write commits do not
+pollute the read profile.
+
+Interpretation rule: choose the path from repeated workload measurements rather
+than a single run. In particular, First is only attractive when the requested
+range begins very near the bucket head; Seek avoids scanning unrelated keys for
+middle/deep ranges; Point remains the natural baseline for small, sparse, or
+unsorted requests.
+
+V5.32 does not change the short-lived read transaction model. Long-lived bbolt
+read transactions remain intentionally avoided because they can interfere with
+mmap growth during writes/compaction.
+
 ## V5.31 Read Engine 3.0 / Adaptive Cursor Start
 
 V5.31 addresses the access-pattern difference exposed by V5.30. A sorted cursor does not have one universally optimal starting operation: `First()+Next()` favors head ranges, while `Seek()+Next()` favors deep ranges. Since bbolt does not provide a cheap rank/ordinal API for a key, V5.31 uses a bounded probe.

@@ -140,8 +140,9 @@ func (b *ReadBatch) ExecuteContext(ctx context.Context, fn func(ReadBatchResult)
 
 	err := b.db.ReadTransaction(func(tx *Tx) error {
 		engine := newReadEngine(tx)
-		if readBatchHomogeneousSorted(b.ops) && planReadOpsFast(b.ops, defaultReadPlannerOptions()).Path == ReadPathCursor {
-			return executeReadBatchSorted(ctx, &engine, b.ops, fn)
+		plan := planReadOpsFast(b.ops, defaultReadPlannerOptions())
+		if plan.Path == ReadPathCursor {
+			return executeReadBatchSorted(ctx, &engine, b.ops, plan, fn)
 		}
 		return executeReadBatchPoint(ctx, &engine, b.ops, fn)
 	})
@@ -218,7 +219,7 @@ func executeReadBatchPoint(ctx context.Context, engine *ReadEngine, ops []readBa
 	return nil
 }
 
-func executeReadBatchSorted(ctx context.Context, engine *ReadEngine, ops []readBatchOp, fn func(ReadBatchResult) error) error {
+func executeReadBatchSorted(ctx context.Context, engine *ReadEngine, ops []readBatchOp, plan ReadPlan, fn func(ReadBatchResult) error) error {
 	first := ops[0]
 	if first.kind == ReadBatchHGet {
 		bucket, err := engine.hashBucket(first.name)
@@ -237,7 +238,7 @@ func executeReadBatchSorted(ctx context.Context, engine *ReadEngine, ops []readB
 			return nil
 		}
 		c := bucket.Cursor()
-		k, v := adaptiveCursor(c, first.key, defaultReadCursorOptions())
+		k, v := cursorPosition(c, first.key, plan.CursorStart, plan.CursorProbeKeys)
 		for _, op := range ops {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -273,7 +274,7 @@ func executeReadBatchSorted(ctx context.Context, engine *ReadEngine, ops []readB
 			return nil
 		}
 		c := bucket.Cursor()
-		k, v := adaptiveCursor(c, first.key, defaultReadCursorOptions())
+		k, v := cursorPosition(c, first.key, plan.CursorStart, plan.CursorProbeKeys)
 		for _, op := range ops {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -342,8 +343,9 @@ func (db *DB) HGetManyContext(ctx context.Context, name string, keys [][]byte, f
 			}
 			return nil
 		}
-		if planReadKeysFast(keys, defaultReadPlannerOptions()).Path == ReadPathCursor {
-			return scanHashMany(ctx, b, keys, fn)
+		plan := planReadKeysFast(keys, defaultReadPlannerOptions())
+		if plan.Path == ReadPathCursor {
+			return scanHashMany(ctx, b, keys, plan, fn)
 		}
 		for i, key := range keys {
 			if err := ctx.Err(); err != nil {
@@ -402,8 +404,9 @@ func (db *DB) ZScoreManyContext(ctx context.Context, name string, keys [][]byte,
 			}
 			return nil
 		}
-		if planReadKeysFast(keys, defaultReadPlannerOptions()).Path == ReadPathCursor {
-			return scanZScoreMany(ctx, b, keys, fn)
+		plan := planReadKeysFast(keys, defaultReadPlannerOptions())
+		if plan.Path == ReadPathCursor {
+			return scanZScoreMany(ctx, b, keys, plan, fn)
 		}
 		for i, key := range keys {
 			if err := ctx.Err(); err != nil {
@@ -428,9 +431,9 @@ func (db *DB) ZScoreManyContext(ctx context.Context, name string, keys [][]byte,
 	})
 }
 
-func scanHashMany(ctx context.Context, b *bolt.Bucket, keys [][]byte, fn func(int, []byte, []byte, bool) error) error {
+func scanHashMany(ctx context.Context, b *bolt.Bucket, keys [][]byte, plan ReadPlan, fn func(int, []byte, []byte, bool) error) error {
 	c := b.Cursor()
-	k, v := adaptiveCursor(c, keys[0], defaultReadCursorOptions())
+	k, v := cursorPosition(c, keys[0], plan.CursorStart, plan.CursorProbeKeys)
 	for i, key := range keys {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -449,9 +452,9 @@ func scanHashMany(ctx context.Context, b *bolt.Bucket, keys [][]byte, fn func(in
 	return nil
 }
 
-func scanZScoreMany(ctx context.Context, b *bolt.Bucket, keys [][]byte, fn func(int, []byte, uint64, bool) error) error {
+func scanZScoreMany(ctx context.Context, b *bolt.Bucket, keys [][]byte, plan ReadPlan, fn func(int, []byte, uint64, bool) error) error {
 	c := b.Cursor()
-	k, v := adaptiveCursor(c, keys[0], defaultReadCursorOptions())
+	k, v := cursorPosition(c, keys[0], plan.CursorStart, plan.CursorProbeKeys)
 	for i, key := range keys {
 		if err := ctx.Err(); err != nil {
 			return err

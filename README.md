@@ -685,6 +685,36 @@ are justified.
 
 V5.29 makes the adaptive read planner cheaper on the hot path. Large homogeneous batches only need a sortedness check because the cursor threshold already determines the path; small batches retain locality/duplicate heuristics. `ReadBatch` also avoids temporary key-slice construction while planning. No read cache and no long-lived bbolt read transaction were introduced.
 
+## V5.32 Read Engine 4.0 / Point-First-Seek Adaptive Access Path
+
+V5.32 makes the physical read choice explicit. `ReadPlan.AccessPath` reports one
+of `point`, `first`, `seek`, or `adaptive`, while the existing `ReadPath` field
+remains unchanged for API compatibility. The default planner continues to use
+point lookups for unsorted/sparse workloads and cursor traversal for sufficiently
+large or strongly local sorted workloads.
+
+`ReadPlannerOptions.CursorStart` can explicitly select `ReadCursorFirst`,
+`ReadCursorSeek`, or `ReadCursorAdaptive`. Zero values are normalized to the
+V5.31-compatible adaptive mode, so older option literals remain valid.
+
+The V5.32 execution path passes the planner decision all the way into the
+cursor scan instead of silently forcing the adaptive cursor. This makes the
+planner observable and benchmarkable without changing callback order,
+duplicate handling, ownership semantics, or transaction lifetime.
+
+V5.32 also removes a redundant homogeneous/sortedness scan in `ReadBatch`: the
+fast operation planner already validates those conditions, so its single result
+is reused by execution.
+
+The project deliberately does not self-tune from runtime timings. bbolt's cost
+is affected by mmap state, OS cache, CPU cache, database size, and workload;
+a deterministic planner is safer and easier to reproduce. Benchmark results
+can be used to tune `MinCursorKeys`, `MinLocalityKeys`, `LocalityThreshold`, and
+`CursorStart` for a known deployment.
+
+No storage-format, recovery, integrity, durability, write-pipeline, or lifecycle
+semantics changed in V5.32. Read transactions remain short-lived.
+
 ## V5.31 Read Engine 3.0 / Adaptive Cursor Start
 
 V5.31 extends the sorted-read path with a bounded, data-independent adaptive cursor start. `Cursor.First()+Next()` is very fast when the requested range begins near the head of a bucket, while `Cursor.Seek()+Next()` is preferable for deeper ranges. Because bbolt does not expose a cheap key ordinal, production reads now probe from `First()` for at most `HeadProbeKeys` entries (default `8`) and fall back to `Seek(firstKey)` when the requested range is not reached.
