@@ -153,14 +153,11 @@ func (db *DB) NewHIteratorContext(ctx context.Context, name string, keyStart []b
 	}
 	it := &hIterator{items: make([]Entry, 0, limit)}
 	err := db.View(func(tx *Tx) error {
-		r, err := NewReadEngine(tx)
-		if err != nil {
-			return err
-		}
+		r := newReadEngine(tx)
 		if reverse {
-			return captureHIterator(r, name, keyStart, limit, true, it)
+			return captureHIterator(&r, name, keyStart, limit, true, it)
 		}
-		return captureHIterator(r, name, keyStart, limit, false, it)
+		return captureHIterator(&r, name, keyStart, limit, false, it)
 	})
 	if err != nil {
 		_ = it.Close()
@@ -242,10 +239,7 @@ func (db *DB) NewZIteratorContext(ctx context.Context, name string, keyStart, sc
 	}
 	it := &zIterator{items: make([]zIteratorItem, 0, limit)}
 	err := db.View(func(tx *Tx) error {
-		r, err := NewReadEngine(tx)
-		if err != nil {
-			return err
-		}
+		r := newReadEngine(tx)
 		if err := validName(name); err != nil {
 			return err
 		}

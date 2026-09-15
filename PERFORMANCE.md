@@ -114,3 +114,48 @@ The planner is intentionally heuristic rather than benchmark-self-tuning. The
 `ReadPlan.Reason`, `Locality`, and `DuplicateRatio` fields make the decision
 observable so a real application can compare its workload with benchmark results
 before changing planner thresholds.
+
+## V5.29 Read Planner 2.0
+
+V5.29 separates the diagnostic/full planner from the hot-path planner. For batches at or above `MinCursorKeys`, only sortedness can change the physical decision, so the hot path skips locality and duplicate calculations. Small batches retain the V5.28 locality heuristic.
+
+Recommended profiling commands:
+
+```bash
+go test -run '^$' -bench '^BenchmarkV529' -benchmem -count=5
+go test -run '^$' -bench '^BenchmarkV529HGetMany100Sorted$' -benchmem -cpuprofile cpu.out -memprofile mem.out
+```
+
+All database population is performed before `ResetTimer`, so the measured profile represents the read workload rather than benchmark setup writes.
+
+## V5.30 Read Engine 2.0
+
+V5.30 targets the fixed overhead exposed by the V5.29 profile after the planner
+was moved out of the hot CPU path. The main changes are deliberately conservative:
+
+1. Production callbacks construct `ReadEngine` as a stack value through the
+   internal `newReadEngine` helper instead of allocating a `*ReadEngine` for
+   every short read transaction.
+2. Sorted homogeneous cursor reads use `Cursor.Seek(firstKey)` rather than
+   `Cursor.First()`. This preserves exact caller ordering while avoiding work
+   before the first requested key.
+3. The public `NewReadEngine` constructor remains unchanged for compatibility.
+4. Read transactions remain short-lived. V5.30 intentionally does not introduce
+   long-lived reader transactions, reader pools, global locks, or read caches.
+
+### Benchmarks
+
+Run on the same machine/workload used for V5.29:
+
+```text
+BenchmarkV530HGetMany100SortedHead
+BenchmarkV530HGetMany100SortedMiddle
+BenchmarkV530HGetMany1000SortedMiddle
+BenchmarkV530HGetMany100Random
+BenchmarkV530NewReadEngine
+```
+
+The expected improvement is workload-dependent. The middle/tail sorted cases
+should benefit most from `Seek(firstKey)`; the allocation reduction is most
+visible in high-frequency managed reads. Use repeated `-count=5` runs and
+compare against the V5.29 baseline rather than relying on a single run.

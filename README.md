@@ -680,3 +680,21 @@ The hit-rate dimensions are measurement dimensions rather than hidden cache hint
 V5.28 intentionally does not introduce a read cache. Cache policy should only be
 added after real workload data demonstrates that its consistency and memory cost
 are justified.
+
+## V5.29 Read Planner 2.0
+
+V5.29 makes the adaptive read planner cheaper on the hot path. Large homogeneous batches only need a sortedness check because the cursor threshold already determines the path; small batches retain locality/duplicate heuristics. `ReadBatch` also avoids temporary key-slice construction while planning. No read cache and no long-lived bbolt read transaction were introduced.
+
+## V5.30 Read Engine 2.0
+
+V5.30 continues the read-path optimization after the V5.29 planner work. The
+production hot path now constructs `ReadEngine` as a stack value, avoiding an
+otherwise unnecessary Go heap allocation per managed read transaction. Sorted
+`HGetMany`, `ZScoreMany`, and homogeneous `ReadBatch` cursor paths also start
+with `Cursor.Seek(firstKey)` instead of `Cursor.First()`, which is especially
+useful when the requested range begins in the middle or near the end of a large
+bucket.
+
+The optimization is intentionally conservative: UDB still uses short-lived
+bbolt read transactions. V5.30 does not introduce long-lived read transactions,
+reader pools, global read locks, or a read cache.

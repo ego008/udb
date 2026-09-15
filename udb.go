@@ -239,18 +239,18 @@ func (db *DB) HdelBucket(tx *Tx, name string) error {
 }
 
 func (db *DB) Hget(tx *Tx, name string, key []byte) *Reply {
-	r, err := NewReadEngine(tx)
-	if err != nil {
+	if err := validTx(tx); err != nil {
 		return errorReply(err)
 	}
+	r := newReadEngine(tx)
 	return r.HGet(name, key)
 }
 
 func (db *DB) HgetInt(tx *Tx, name string, key []byte) (uint64, error) {
-	r, err := NewReadEngine(tx)
-	if err != nil {
+	if err := validTx(tx); err != nil {
 		return 0, err
 	}
+	r := newReadEngine(tx)
 	return r.HGetInt(name, key)
 }
 
@@ -562,19 +562,19 @@ func (db *DB) ZdelBucket(tx *Tx, name string) error {
 }
 
 func (db *DB) Zget(tx *Tx, name string, key []byte) *Reply {
-	r, err := NewReadEngine(tx)
-	if err != nil {
+	if err := validTx(tx); err != nil {
 		return errorReply(err)
 	}
+	r := newReadEngine(tx)
 	return r.ZGet(name, key)
 }
 
 // Zscore is the typed equivalent of Zget.
 func (db *DB) Zscore(tx *Tx, name string, key []byte) (uint64, error) {
-	r, err := NewReadEngine(tx)
-	if err != nil {
+	if err := validTx(tx); err != nil {
 		return 0, err
 	}
+	r := newReadEngine(tx)
 	return r.ZScore(name, key)
 }
 
@@ -663,10 +663,10 @@ func (db *DB) Zrscan(tx *Tx, name string, keyStart, scoreStart []byte, limit int
 }
 
 func (db *DB) zscan(tx *Tx, name string, keyStart, scoreStart []byte, limit int, reverse bool) *Reply {
-	r, err := NewReadEngine(tx)
-	if err != nil {
+	if err := validTx(tx); err != nil {
 		return errorReply(err)
 	}
+	r := newReadEngine(tx)
 	return r.zscan(name, keyStart, scoreStart, limit, reverse)
 }
 
@@ -676,10 +676,10 @@ func (db *DB) zscan(tx *Tx, name string, keyStart, scoreStart []byte, limit int,
 // This is an internal zero-copy path used by algorithms that can consume data
 // synchronously and do not need Reply's post-transaction ownership guarantee.
 func (db *DB) zscanEach(tx *Tx, name string, keyStart, scoreStart []byte, limit int, reverse bool, fn func(member []byte, score uint64) error) error {
-	r, err := NewReadEngine(tx)
-	if err != nil {
+	if err := validTx(tx); err != nil {
 		return err
 	}
+	r := newReadEngine(tx)
 	return r.ZScanEach(name, keyStart, scoreStart, limit, reverse, fn)
 }
 

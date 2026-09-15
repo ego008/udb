@@ -5,12 +5,10 @@ package udb
 func (db *DB) HGetInt(name string, key []byte) (uint64, error) {
 	var value uint64
 	err := db.ReadTransaction(func(tx *Tx) error {
-		engine, err := NewReadEngine(tx)
-		if err != nil {
-			return err
-		}
-		value, err = engine.HGetInt(name, key)
-		return err
+		engine := newReadEngine(tx)
+		var err2 error
+		value, err2 = engine.HGetInt(name, key)
+		return err2
 	})
 	return value, err
 }
@@ -19,12 +17,10 @@ func (db *DB) HGetInt(name string, key []byte) (uint64, error) {
 func (db *DB) ZScore(name string, key []byte) (uint64, error) {
 	var value uint64
 	err := db.ReadTransaction(func(tx *Tx) error {
-		engine, err := NewReadEngine(tx)
-		if err != nil {
-			return err
-		}
-		value, err = engine.ZScore(name, key)
-		return err
+		engine := newReadEngine(tx)
+		var err2 error
+		value, err2 = engine.ZScore(name, key)
+		return err2
 	})
 	return value, err
 }
@@ -33,10 +29,7 @@ func (db *DB) ZScore(name string, key []byte) (uint64, error) {
 func (db *DB) HGetBatch(name string, keys [][]byte) *Reply {
 	var result *Reply
 	if err := db.ReadTransaction(func(tx *Tx) error {
-		engine, err := NewReadEngine(tx)
-		if err != nil {
-			return err
-		}
+		engine := newReadEngine(tx)
 		result = engine.HGetBatch(name, keys)
 		return result.ErrOrNil()
 	}); err != nil {
@@ -49,10 +42,7 @@ func (db *DB) HGetBatch(name string, keys [][]byte) *Reply {
 func (db *DB) ZGetBatch(name string, keys [][]byte) *Reply {
 	var result *Reply
 	if err := db.ReadTransaction(func(tx *Tx) error {
-		engine, err := NewReadEngine(tx)
-		if err != nil {
-			return err
-		}
+		engine := newReadEngine(tx)
 		result = engine.ZGetBatch(name, keys)
 		return result.ErrOrNil()
 	}); err != nil {

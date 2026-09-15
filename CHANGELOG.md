@@ -143,3 +143,30 @@
 - Added workload benchmarks for batch size, sorted/reverse workloads, 100%/50%/10% hit rates, ZSet reads, parallel readers, and planner overhead.
 - Added planner and semantic regression tests.
 - Deliberately did not add a read cache: consistency, invalidation, Snapshot, Repair, Pipeline, and Compact interactions remain out of the V5.28 scope.
+
+## V5.29 — Read Planner 2.0 / Fast Adaptive Read Planner
+
+V5.29 optimizes the hot read-planning path without introducing a cache, long-lived bbolt read transaction, reader pool, or new locking layer.
+
+- Large homogeneous batches now use a sortedness-only planner: once `MinCursorKeys` is reached, locality and duplicate statistics cannot change the decision, so the planner avoids the second heuristic pass and floating-point work.
+- `ReadBatch` planning avoids constructing a temporary `[][]byte` for operation keys.
+- Small batches retain the V5.28 locality/duplicate heuristic, preserving useful adaptive behavior for short clustered requests.
+- Public `PlanReadKeys` / `PlanReadKeysWithOptions` keep their diagnostic fields and V5.28 semantics.
+- Added V5.29 workload benchmarks with setup fully outside the measured region.
+- Added regression tests for planner decisions, input ownership, and read semantics.
+
+The design goal remains: **planner cost must stay smaller than the work it saves**.
+
+## V5.30
+
+### Read Engine 2.0 — hot-path allocation and cursor-start optimization
+
+- Added an internal stack-value `newReadEngine` constructor for production read paths.
+- High-frequency managed reads no longer allocate a `*ReadEngine` merely to enter a short bbolt read transaction.
+- Preserved the public `NewReadEngine` API and all V5.24 transaction-scoped semantics.
+- Sorted `HGetMany`, `ZScoreMany`, and homogeneous `ReadBatch` cursor scans now start with `Cursor.Seek(firstKey)` instead of `Cursor.First()`.
+- This avoids scanning unrelated keys before the first requested key and reduces cursor initialization work for mid/tail-range reads.
+- Added V5.30 correctness regressions for Seek-start behavior and unsorted/duplicate semantics.
+- Added V5.30 benchmark coverage for head/middle/tail sorted ranges and random batches.
+- No long-lived bbolt read transactions, reader pools, global read locks, or read caches were introduced.
+- No changes to storage format, recovery, integrity, durability, write ordering, or public ownership semantics.

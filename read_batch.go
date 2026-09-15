@@ -139,15 +139,11 @@ func (b *ReadBatch) ExecuteContext(ctx context.Context, fn func(ReadBatchResult)
 	}
 
 	err := b.db.ReadTransaction(func(tx *Tx) error {
-		engine, err := NewReadEngine(tx)
-		if err != nil {
-			return err
+		engine := newReadEngine(tx)
+		if readBatchHomogeneousSorted(b.ops) && planReadOpsFast(b.ops, defaultReadPlannerOptions()).Path == ReadPathCursor {
+			return executeReadBatchSorted(ctx, &engine, b.ops, fn)
 		}
-		if readBatchHomogeneousSorted(b.ops) && planReadOps(b.ops, defaultReadPlannerOptions()).Path == ReadPathCursor {
-			return executeReadBatchSorted(ctx, engine, b.ops, fn)
-		}
-		return executeReadBatchPoint(ctx, engine, b.ops, fn)
-		return executeReadBatchPoint(ctx, engine, b.ops, fn)
+		return executeReadBatchPoint(ctx, &engine, b.ops, fn)
 	})
 	if err == nil {
 		b.closed = true
@@ -241,7 +237,7 @@ func executeReadBatchSorted(ctx context.Context, engine *ReadEngine, ops []readB
 			return nil
 		}
 		c := bucket.Cursor()
-		k, v := c.First()
+		k, v := c.Seek(first.key)
 		for _, op := range ops {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -277,7 +273,7 @@ func executeReadBatchSorted(ctx context.Context, engine *ReadEngine, ops []readB
 			return nil
 		}
 		c := bucket.Cursor()
-		k, v := c.First()
+		k, v := c.Seek(first.key)
 		for _, op := range ops {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -330,10 +326,7 @@ func (db *DB) HGetManyContext(ctx context.Context, name string, keys [][]byte, f
 		return err
 	}
 	return db.View(func(tx *Tx) error {
-		r, err := NewReadEngine(tx)
-		if err != nil {
-			return err
-		}
+		r := newReadEngine(tx)
 		b, err := r.hashBucket(name)
 		if err != nil {
 			return err
@@ -349,7 +342,7 @@ func (db *DB) HGetManyContext(ctx context.Context, name string, keys [][]byte, f
 			}
 			return nil
 		}
-		if planReadKeys(keys, defaultReadPlannerOptions()).Path == ReadPathCursor {
+		if planReadKeysFast(keys, defaultReadPlannerOptions()).Path == ReadPathCursor {
 			return scanHashMany(ctx, b, keys, fn)
 		}
 		for i, key := range keys {
@@ -393,10 +386,7 @@ func (db *DB) ZScoreManyContext(ctx context.Context, name string, keys [][]byte,
 		return err
 	}
 	return db.View(func(tx *Tx) error {
-		r, err := NewReadEngine(tx)
-		if err != nil {
-			return err
-		}
+		r := newReadEngine(tx)
 		b, err := r.zScoreBucket(name)
 		if err != nil {
 			return err
@@ -412,7 +402,7 @@ func (db *DB) ZScoreManyContext(ctx context.Context, name string, keys [][]byte,
 			}
 			return nil
 		}
-		if planReadKeys(keys, defaultReadPlannerOptions()).Path == ReadPathCursor {
+		if planReadKeysFast(keys, defaultReadPlannerOptions()).Path == ReadPathCursor {
 			return scanZScoreMany(ctx, b, keys, fn)
 		}
 		for i, key := range keys {

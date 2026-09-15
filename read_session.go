@@ -118,8 +118,8 @@ func (s *ReadSession) ZRScan(name string, keyStart, scoreStart []byte, limit int
 }
 
 func (s *ReadSession) readEngine(tx *Tx) *ReadEngine {
-	r, _ := NewReadEngine(tx)
-	return r
+	r := newReadEngine(tx)
+	return &r
 }
 
 // Read executes multiple reads in one short-lived managed transaction. The
@@ -146,11 +146,8 @@ func (s *ReadSession) ReadContext(ctx context.Context, fn func(*ReadEngine) erro
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		r, err := NewReadEngine(tx)
-		if err != nil {
-			return err
-		}
-		return fn(r)
+		r := newReadEngine(tx)
+		return fn(&r)
 	})
 }
 
