@@ -78,3 +78,39 @@ go tool pprof -http=:0 mem.out
 ```
 
 The long-lived read transaction rule from V5.22 remains mandatory: no public iterator may retain a bbolt read transaction between `Next` calls.
+
+## V5.28 Adaptive Read Planner
+
+V5.28 makes the point-vs-cursor choice data-shape aware. The planner uses only the
+requested key sequence, so it adds no read transaction and does not inspect or
+mutate database state.
+
+Run the workload suite with:
+
+```bash
+go test -run '^$' -bench '^BenchmarkV528' -benchmem -count=5
+```
+
+Recommended profiling:
+
+```bash
+go test -run '^$' -bench '^BenchmarkV528HGetMany100Sorted100Hit$' -benchmem -cpuprofile cpu.out -memprofile mem.out
+
+go tool pprof -http=:0 cpu.out
+
+go tool pprof -http=:0 mem.out
+```
+
+Interpretation guide:
+
+- Sorted workloads should use the sequential cursor path once they are large enough.
+- Small but strongly clustered keys may use the cursor path through the locality heuristic.
+- Reverse/random workloads should remain on point lookups and preserve caller order.
+- Hit-rate changes should not alter correctness or force a cache; they are benchmark dimensions for deciding whether a future cache is justified.
+- Parallel-reader benchmarks measure bbolt's read concurrency without changing the
+  single-transaction ownership model.
+
+The planner is intentionally heuristic rather than benchmark-self-tuning. The
+`ReadPlan.Reason`, `Locality`, and `DuplicateRatio` fields make the decision
+observable so a real application can compare its workload with benchmark results
+before changing planner thresholds.

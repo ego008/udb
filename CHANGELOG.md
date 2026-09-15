@@ -131,3 +131,15 @@
 - Added sorted-cursor fast paths to the specialized Many APIs while preserving callback order and duplicate-key semantics.
 - Preserved ownership-safe `ReadBatch.HGet` / `ReadBatch.ZScore` behavior and all V5.26 transaction/lifecycle semantics.
 - Added V5.27 correctness tests and read-path benchmarks for sorted, unsorted, duplicate and borrowed-key workloads.
+
+## V5.28
+
+### Adaptive Read Planner and workload benchmark
+
+- Added `ReadPath`, `ReadPlan`, `ReadPlannerOptions`, `PlanReadKeys`, and `PlanReadKeysWithOptions`.
+- Added deterministic automatic selection between B-tree point lookups and sequential cursor traversal for homogeneous reads.
+- Planner considers key count, sortedness, adjacent-key locality, and duplicate ratio; it never changes logical result order.
+- Wired the planner into `ReadBatch`, `HGetMany`, and `ZScoreMany` while preserving all V5.27 ownership and transaction-lifetime rules.
+- Added workload benchmarks for batch size, sorted/reverse workloads, 100%/50%/10% hit rates, ZSet reads, parallel readers, and planner overhead.
+- Added planner and semantic regression tests.
+- Deliberately did not add a read cache: consistency, invalidation, Snapshot, Repair, Pipeline, and Compact interactions remain out of the V5.28 scope.

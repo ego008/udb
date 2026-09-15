@@ -641,3 +641,42 @@ uses the sorted cursor fast path. Duplicate keys are also preserved.
 As with other callback-scoped zero-copy APIs, callback buffers must not be retained
 or modified after the callback returns. No public V5.27 API keeps a bbolt read
 transaction open between callbacks.
+
+## V5.28 Adaptive Read Planner & Workload Benchmark
+
+V5.28 adds a deterministic adaptive read planner on top of the V5.27 point/cursor
+read paths. The planner does not change result ordering or ownership semantics;
+it only decides which physical lookup path is cheaper for a homogeneous key set.
+
+```go
+plan := udb.PlanReadKeys(keys)
+// plan.Path is ReadPathPoint or ReadPathCursor.
+// plan.Locality and plan.DuplicateRatio describe the workload shape.
+```
+
+The default policy is deliberately conservative:
+
+- unsorted or heterogeneous requests use point lookups;
+- small sorted batches use point lookups unless adjacent keys are strongly local;
+- larger sorted batches use one sequential cursor;
+- duplicate-heavy sorted requests can use the cursor because repeated point
+  searches would repeat the same B-tree work.
+
+Applications that have measured a different workload shape can inspect/tune the
+planner with `PlanReadKeysWithOptions` and `ReadPlannerOptions`. This is a planning
+API only: it never opens a database transaction and cannot affect correctness.
+
+V5.28 also adds workload benchmarks covering:
+
+- 10 / 100 / 1000 key batches;
+- sorted versus reverse/random workloads;
+- 100% / 50% / 10% hit-rate workloads;
+- ZSet score batches;
+- ReadBatch sorted workloads;
+- parallel readers;
+- planner-only CPU/allocation cost.
+
+The hit-rate dimensions are measurement dimensions rather than hidden cache hints:
+V5.28 intentionally does not introduce a read cache. Cache policy should only be
+added after real workload data demonstrates that its consistency and memory cost
+are justified.

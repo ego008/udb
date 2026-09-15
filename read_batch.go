@@ -143,9 +143,10 @@ func (b *ReadBatch) ExecuteContext(ctx context.Context, fn func(ReadBatchResult)
 		if err != nil {
 			return err
 		}
-		if readBatchHomogeneousSorted(b.ops) {
+		if readBatchHomogeneousSorted(b.ops) && planReadOps(b.ops, defaultReadPlannerOptions()).Path == ReadPathCursor {
 			return executeReadBatchSorted(ctx, engine, b.ops, fn)
 		}
+		return executeReadBatchPoint(ctx, engine, b.ops, fn)
 		return executeReadBatchPoint(ctx, engine, b.ops, fn)
 	})
 	if err == nil {
@@ -348,7 +349,7 @@ func (db *DB) HGetManyContext(ctx context.Context, name string, keys [][]byte, f
 			}
 			return nil
 		}
-		if isSortedKeys(keys) {
+		if planReadKeys(keys, defaultReadPlannerOptions()).Path == ReadPathCursor {
 			return scanHashMany(ctx, b, keys, fn)
 		}
 		for i, key := range keys {
@@ -411,7 +412,7 @@ func (db *DB) ZScoreManyContext(ctx context.Context, name string, keys [][]byte,
 			}
 			return nil
 		}
-		if isSortedKeys(keys) {
+		if planReadKeys(keys, defaultReadPlannerOptions()).Path == ReadPathCursor {
 			return scanZScoreMany(ctx, b, keys, fn)
 		}
 		for i, key := range keys {
@@ -435,15 +436,6 @@ func (db *DB) ZScoreManyContext(ctx context.Context, name string, keys [][]byte,
 		}
 		return nil
 	})
-}
-
-func isSortedKeys(keys [][]byte) bool {
-	for i := 1; i < len(keys); i++ {
-		if bytes.Compare(keys[i-1], keys[i]) > 0 {
-			return false
-		}
-	}
-	return len(keys) > 1
 }
 
 func scanHashMany(ctx context.Context, b *bolt.Bucket, keys [][]byte, fn func(int, []byte, []byte, bool) error) error {
