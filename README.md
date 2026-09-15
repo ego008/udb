@@ -578,3 +578,66 @@ V5.26 adds a callback-based `ReadBatch` for heterogeneous point reads. `HGet` an
 V5.26 also reduces iterator allocation by storing captured iterator bytes in a contiguous arena instead of allocating independent byte slices for every entry. Iterators still materialize data before returning and never keep a bbolt read transaction open between `Next` calls.
 
 Design rule: zero-copy data is transaction-scoped and must not escape the callback. Public ownership-safe APIs such as `HGet`, `ZGet`, `ZScan`, and iterator access remain unchanged.
+
+## V5.27 Read Path 2.0
+
+V5.27 adds a high-throughput read path without introducing long-lived bbolt read transactions.
+
+### Borrowed ReadBatch
+
+The existing APIs remain ownership-safe:
+
+```go
+batch, err := db.NewReadBatch()
+if err != nil { return err }
+defer batch.Close()
+
+_ = batch.HGet("users", key) // copies key
+_ = batch.ZScore("rank", key) // copies key
+```
+
+For hot paths where the caller already controls the input buffer lifetime, use the
+borrowed variants:
+
+```go
+_ = batch.HGetBorrowed("users", key)
+_ = batch.ZScoreBorrowed("rank", key)
+
+err = batch.Execute(func(r udb.ReadBatchResult) error {
+    // r.Key/r.Value are valid only during this callback.
+    return nil
+})
+```
+
+A borrowed key must not be modified until `Execute` returns. This API exists to
+avoid the per-key input copies identified by the V5.26 allocation profile.
+
+### Sorted batch fast path
+
+When a `ReadBatch` contains only one operation kind, one bucket name, and keys are
+already in ascending byte order, UDB automatically uses one bbolt cursor and
+sequential traversal. Unsorted or heterogeneous batches retain the general
+`Bucket.Get` path, preserving arbitrary input order.
+
+### Specialized Many APIs
+
+For homogeneous hot paths, `HGetMany` and `ZScoreMany` avoid the generic
+`ReadBatchResult` wrapper:
+
+```go
+err := db.HGetMany("users", keys, func(i int, key, value []byte, found bool) error {
+    // key/value are valid only during this callback.
+    return nil
+})
+
+err = db.ZScoreMany("rank", keys, func(i int, key []byte, score uint64, found bool) error {
+    return nil
+})
+```
+
+These APIs preserve the caller's key order even when the internal implementation
+uses the sorted cursor fast path. Duplicate keys are also preserved.
+
+As with other callback-scoped zero-copy APIs, callback buffers must not be retained
+or modified after the callback returns. No public V5.27 API keeps a bbolt read
+transaction open between callbacks.

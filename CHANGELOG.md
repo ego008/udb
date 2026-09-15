@@ -120,3 +120,14 @@
 - Reduced `HIterator` and `ZIterator` per-entry allocation by using contiguous byte arenas.
 - Preserved the V5.22+ rule that public iterators never hold a long-lived bbolt read transaction.
 - Added V5.26 correctness tests and benchmarks.
+
+## V5.27
+
+### Read Path 2.0
+
+- Added zero-copy `ReadBatch.HGetBorrowed` and `ReadBatch.ZScoreBorrowed` APIs. Borrowed keys must remain unchanged until the batch execution returns.
+- Added automatic sorted-batch execution for homogeneous `ReadBatch` operations whose keys are already in ascending byte order. The implementation uses one bbolt cursor and sequential traversal instead of one B-tree search per key.
+- Added specialized `HGetMany` / `HGetManyContext` and `ZScoreMany` / `ZScoreManyContext` APIs with callback-scoped borrowed input/output buffers.
+- Added sorted-cursor fast paths to the specialized Many APIs while preserving callback order and duplicate-key semantics.
+- Preserved ownership-safe `ReadBatch.HGet` / `ReadBatch.ZScore` behavior and all V5.26 transaction/lifecycle semantics.
+- Added V5.27 correctness tests and read-path benchmarks for sorted, unsorted, duplicate and borrowed-key workloads.
