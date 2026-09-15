@@ -53,3 +53,28 @@ Iterator benchmarks include iterator construction, materialization, full
 consumption, and `Close`, because those operations are the complete ownership-safe
 iterator lifecycle. The primary trade-off is lower caller complexity and safe slow
 consumption versus memory proportional to the requested result.
+
+## V5.26 Performance Baseline
+
+V5.26 adds two performance-oriented read paths:
+
+1. `ReadBatch`: heterogeneous HGet/ZScore operations executed inside one short read transaction. Results are delivered through a callback and are zero-copy with respect to bbolt pages; callback byte slices must not escape the callback.
+2. Iterator arena storage: `HIterator` and `ZIterator` still materialize data before returning, but captured bytes are stored in a contiguous arena instead of cloning every entry into an independent allocation.
+
+Recommended benchmark commands:
+
+```bash
+go test -run '^$' -bench '^BenchmarkV526' -benchmem -count=5
+```
+
+For CPU/heap profiling:
+
+```bash
+go test -run '^$' -bench '^BenchmarkV526ReadBatch100$' -benchmem -cpuprofile cpu.out -memprofile mem.out
+
+go tool pprof -http=:0 cpu.out
+
+go tool pprof -http=:0 mem.out
+```
+
+The long-lived read transaction rule from V5.22 remains mandatory: no public iterator may retain a bbolt read transaction between `Next` calls.

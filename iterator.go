@@ -13,8 +13,21 @@ type HIterator interface {
 	Close() error
 }
 
+// ZIterator iterates over an ownership-safe in-memory ZSet result captured
+// from one short read transaction. It never keeps a bbolt transaction open
+// between Next calls, so a caller may consume it slowly without blocking
+// database writes.
+type ZIterator interface {
+	Next() bool
+	Member() []byte
+	Score() uint64
+	Err() error
+	Close() error
+}
+
 type hIterator struct {
 	items  []Entry
+	arena  []byte
 	pos    int
 	key    []byte
 	value  []byte
@@ -58,19 +71,10 @@ func (it *hIterator) Close() error {
 	}
 	it.closed = true
 	it.items = nil
+	it.arena = nil
 	it.key = nil
 	it.value = nil
 	return nil
-}
-
-// ZIterator iterates over an ownership-safe in-memory ZSet result captured from
-// one short read transaction.
-type ZIterator interface {
-	Next() bool
-	Member() []byte
-	Score() uint64
-	Err() error
-	Close() error
 }
 
 type zIteratorItem struct {
@@ -79,6 +83,7 @@ type zIteratorItem struct {
 }
 type zIterator struct {
 	items  []zIteratorItem
+	arena  []byte
 	pos    int
 	member []byte
 	score  uint64
@@ -122,6 +127,7 @@ func (it *zIterator) Close() error {
 	}
 	it.closed = true
 	it.items = nil
+	it.arena = nil
 	it.member = nil
 	return nil
 }
@@ -187,13 +193,25 @@ func captureHIterator(r *ReadEngine, name string, keyStart []byte, limit int, re
 	} else {
 		k, v = seekForward(c, keyStart, len(keyStart) > 0)
 	}
+	// Store all bytes in one arena. Offsets are used while the arena grows, so
+	// reallocations cannot invalidate already captured entries.
+	type span struct{ ko, kl, vo, vl int }
+	spans := make([]span, 0, limit)
 	for n := 0; k != nil && n < limit; n++ {
-		it.items = append(it.items, Entry{Key: cloneBytes(k), Value: cloneBytes(v)})
+		ko := len(it.arena)
+		it.arena = append(it.arena, k...)
+		vo := len(it.arena)
+		it.arena = append(it.arena, v...)
+		spans = append(spans, span{ko, len(k), vo, len(v)})
 		if reverse {
 			k, v = c.Prev()
 		} else {
 			k, v = c.Next()
 		}
+	}
+	it.items = make([]Entry, len(spans))
+	for i, x := range spans {
+		it.items[i] = Entry{Key: it.arena[x.ko : x.ko+x.kl], Value: it.arena[x.vo : x.vo+x.vl]}
 	}
 	return nil
 }
@@ -245,16 +263,27 @@ func (db *DB) NewZIteratorContext(ctx context.Context, name string, keyStart, sc
 		} else {
 			k, _ = zseekForward(c, keyStart, scoreStart)
 		}
+		type span struct {
+			off, len int
+			score    uint64
+		}
+		spans := make([]span, 0, limit)
 		for n := 0; k != nil && n < limit; n++ {
 			if len(k) < uint64EncodedLen {
 				return ErrInvalidScore
 			}
-			it.items = append(it.items, zIteratorItem{member: cloneBytes(k[uint64EncodedLen:]), score: binaryScore(k[:uint64EncodedLen])})
+			off := len(it.arena)
+			it.arena = append(it.arena, k[uint64EncodedLen:]...)
+			spans = append(spans, span{off: off, len: len(k) - uint64EncodedLen, score: binaryScore(k[:uint64EncodedLen])})
 			if reverse {
 				k, _ = c.Prev()
 			} else {
 				k, _ = c.Next()
 			}
+		}
+		it.items = make([]zIteratorItem, len(spans))
+		for i, x := range spans {
+			it.items[i] = zIteratorItem{member: it.arena[x.off : x.off+x.len], score: x.score}
 		}
 		return nil
 	})

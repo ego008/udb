@@ -112,3 +112,11 @@
 - Added context cancellation and idempotent session/iterator close tests.
 - Preserved V5.24 ReadEngine, Snapshot, lifecycle, recovery, integrity and durability semantics.
 - No long-lived bbolt read transaction is introduced by V5.25.
+
+## V5.26
+
+- Added callback-based heterogeneous `ReadBatch` with transaction-scoped zero-copy result delivery.
+- Added context-aware `ReadBatch.ExecuteContext`.
+- Reduced `HIterator` and `ZIterator` per-entry allocation by using contiguous byte arenas.
+- Preserved the V5.22+ rule that public iterators never hold a long-lived bbolt read transaction.
+- Added V5.26 correctness tests and benchmarks.

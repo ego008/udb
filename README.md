@@ -570,3 +570,11 @@ The trade-off is memory proportional to the iterator result size.
 Context constructors (`NewHIteratorContext` / `NewZIteratorContext`) reject an
 already-cancelled context before opening the read transaction. Context cancellation
 does not interrupt an already-running bbolt operation.
+
+## V5.26 Zero-Copy Read & ReadBatch
+
+V5.26 adds a callback-based `ReadBatch` for heterogeneous point reads. `HGet` and `ZScore` operations can be executed in one short managed read transaction, and callback result bytes are valid only during the callback. This avoids result materialization for large read batches.
+
+V5.26 also reduces iterator allocation by storing captured iterator bytes in a contiguous arena instead of allocating independent byte slices for every entry. Iterators still materialize data before returning and never keep a bbolt read transaction open between `Next` calls.
+
+Design rule: zero-copy data is transaction-scoped and must not escape the callback. Public ownership-safe APIs such as `HGet`, `ZGet`, `ZScan`, and iterator access remain unchanged.
