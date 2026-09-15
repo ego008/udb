@@ -685,6 +685,14 @@ are justified.
 
 V5.29 makes the adaptive read planner cheaper on the hot path. Large homogeneous batches only need a sortedness check because the cursor threshold already determines the path; small batches retain locality/duplicate heuristics. `ReadBatch` also avoids temporary key-slice construction while planning. No read cache and no long-lived bbolt read transaction were introduced.
 
+## V5.31 Read Engine 3.0 / Adaptive Cursor Start
+
+V5.31 extends the sorted-read path with a bounded, data-independent adaptive cursor start. `Cursor.First()+Next()` is very fast when the requested range begins near the head of a bucket, while `Cursor.Seek()+Next()` is preferable for deeper ranges. Because bbolt does not expose a cheap key ordinal, production reads now probe from `First()` for at most `HeadProbeKeys` entries (default `8`) and fall back to `Seek(firstKey)` when the requested range is not reached.
+
+The strategy is shared by `HGetMany`, `ZScoreMany`, and sorted `ReadBatch` paths. It keeps the existing short-lived read-transaction model and does not introduce a reader pool, read cache, global lock, or long-lived bbolt transaction.
+
+V5.31 also adds benchmarks comparing `First`, `Seek`, and `Adaptive` paths at head/middle/deep positions and across multiple batch sizes.
+
 ## V5.30 Read Engine 2.0
 
 V5.30 continues the read-path optimization after the V5.29 planner work. The

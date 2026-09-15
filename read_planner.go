@@ -15,19 +15,26 @@ type ReadPlannerOptions struct {
 	MinCursorKeys     int
 	LocalityThreshold float64
 	MinLocalityKeys   int
+	// HeadProbeKeys bounds the First+Next probe before a sorted cursor
+	// falls back to Seek. It is used by V5.31 production read paths.
+	HeadProbeKeys int
 }
 
 func defaultReadPlannerOptions() ReadPlannerOptions {
-	return ReadPlannerOptions{MinCursorKeys: 16, LocalityThreshold: 0.50, MinLocalityKeys: 4}
+	return ReadPlannerOptions{MinCursorKeys: 16, LocalityThreshold: 0.50, MinLocalityKeys: 4, HeadProbeKeys: 8}
 }
 
 type ReadPlan struct {
-	Path           ReadPath
-	Sorted         bool
-	KeyCount       int
-	Locality       float64
-	DuplicateRatio float64
-	Reason         string
+	Path ReadPath
+	// CursorStart describes how the sorted cursor path should position itself.
+	// It is ReadCursorAdaptive for production reads in V5.31.
+	CursorStart     ReadCursorStart
+	CursorProbeKeys int
+	Sorted          bool
+	KeyCount        int
+	Locality        float64
+	DuplicateRatio  float64
+	Reason          string
 }
 
 func PlanReadKeys(keys [][]byte) ReadPlan { return planReadKeys(keys, defaultReadPlannerOptions()) }
@@ -48,6 +55,9 @@ func normalizePlannerOptions(opts ReadPlannerOptions) ReadPlannerOptions {
 	if opts.LocalityThreshold > 1 {
 		opts.LocalityThreshold = 1
 	}
+	if opts.HeadProbeKeys < 1 {
+		opts.HeadProbeKeys = 1
+	}
 	return opts
 }
 
@@ -55,7 +65,7 @@ func normalizePlannerOptions(opts ReadPlannerOptions) ReadPlannerOptions {
 // duplicate diagnostics for callers that inspect ReadPlan.
 func planReadKeys(keys [][]byte, opts ReadPlannerOptions) ReadPlan {
 	opts = normalizePlannerOptions(opts)
-	plan := ReadPlan{Path: ReadPathPoint, KeyCount: len(keys), Reason: "unsorted-or-small"}
+	plan := ReadPlan{Path: ReadPathPoint, CursorStart: ReadCursorAdaptive, CursorProbeKeys: opts.HeadProbeKeys, KeyCount: len(keys), Reason: "unsorted-or-small"}
 	if len(keys) < 2 {
 		return plan
 	}
@@ -82,11 +92,13 @@ func planReadKeys(keys [][]byte, opts ReadPlannerOptions) ReadPlan {
 	plan.Locality = localitySum / float64(len(keys)-1)
 	if len(keys) >= opts.MinCursorKeys {
 		plan.Path = ReadPathCursor
+		plan.CursorStart = ReadCursorAdaptive
 		plan.Reason = "sorted-enough-keys"
 		return plan
 	}
 	if len(keys) >= opts.MinLocalityKeys && (plan.Locality >= opts.LocalityThreshold || plan.DuplicateRatio >= 0.25) {
 		plan.Path = ReadPathCursor
+		plan.CursorStart = ReadCursorAdaptive
 		plan.Reason = "sorted-local"
 		return plan
 	}
@@ -101,7 +113,7 @@ func planReadKeys(keys [][]byte, opts ReadPlannerOptions) ReadPlan {
 func planReadKeysFast(keys [][]byte, opts ReadPlannerOptions) ReadPlan {
 	opts = normalizePlannerOptions(opts)
 	n := len(keys)
-	plan := ReadPlan{Path: ReadPathPoint, KeyCount: n, Reason: "unsorted-or-small"}
+	plan := ReadPlan{Path: ReadPathPoint, CursorStart: ReadCursorAdaptive, CursorProbeKeys: opts.HeadProbeKeys, KeyCount: n, Reason: "unsorted-or-small"}
 	if n < 2 {
 		return plan
 	}
@@ -119,6 +131,7 @@ func planReadKeysFast(keys [][]byte, opts ReadPlannerOptions) ReadPlan {
 	}
 	plan.Sorted = true
 	plan.Path = ReadPathCursor
+	plan.CursorStart = ReadCursorAdaptive
 	plan.Reason = "sorted-enough-keys"
 	return plan
 }
@@ -136,7 +149,7 @@ func planReadOpsFast(ops []readBatchOp, opts ReadPlannerOptions) ReadPlan {
 
 func planReadOpsFastMode(ops []readBatchOp, opts ReadPlannerOptions, hot bool) ReadPlan {
 	opts = normalizePlannerOptions(opts)
-	plan := ReadPlan{Path: ReadPathPoint, KeyCount: len(ops), Reason: "unsorted-or-small"}
+	plan := ReadPlan{Path: ReadPathPoint, CursorStart: ReadCursorAdaptive, CursorProbeKeys: opts.HeadProbeKeys, KeyCount: len(ops), Reason: "unsorted-or-small"}
 	if len(ops) < 2 {
 		return plan
 	}
@@ -161,12 +174,13 @@ func planReadOpsFastMode(ops []readBatchOp, opts ReadPlannerOptions, hot bool) R
 	}
 	plan.Sorted = true
 	plan.Path = ReadPathCursor
+	plan.CursorStart = ReadCursorAdaptive
 	plan.Reason = "sorted-enough-keys"
 	return plan
 }
 
 func planReadOpsFullSmall(ops []readBatchOp, opts ReadPlannerOptions) ReadPlan {
-	plan := ReadPlan{Path: ReadPathPoint, KeyCount: len(ops), Reason: "unsorted-or-small"}
+	plan := ReadPlan{Path: ReadPathPoint, CursorStart: ReadCursorAdaptive, CursorProbeKeys: opts.HeadProbeKeys, KeyCount: len(ops), Reason: "unsorted-or-small"}
 	if len(ops) < 2 {
 		return plan
 	}
@@ -188,6 +202,7 @@ func planReadOpsFullSmall(ops []readBatchOp, opts ReadPlannerOptions) ReadPlan {
 	plan.Locality = localitySum / float64(len(ops)-1)
 	if len(ops) >= opts.MinLocalityKeys && (plan.Locality >= opts.LocalityThreshold || plan.DuplicateRatio >= 0.25) {
 		plan.Path = ReadPathCursor
+		plan.CursorStart = ReadCursorAdaptive
 		plan.Reason = "sorted-local"
 		return plan
 	}

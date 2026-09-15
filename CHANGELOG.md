@@ -157,6 +157,15 @@ V5.29 optimizes the hot read-planning path without introducing a cache, long-liv
 
 The design goal remains: **planner cost must stay smaller than the work it saves**.
 
+## V5.31 — Read Engine 3.0 / Adaptive Cursor Start
+
+- Added `ReadCursorStart` with `Adaptive`, `First`, and `Seek` modes.
+- Added bounded adaptive cursor probing with `HeadProbeKeys` (default `8`).
+- Sorted `HGetMany`, `ZScoreMany`, and `ReadBatch` cursor scans now use the adaptive start.
+- Added V5.31 access-path benchmarks for First/Seek/Adaptive at head and middle/deep ranges and for multiple batch sizes.
+- Added regression coverage for planner selection, option normalization, and sorted-read semantics.
+- Preserved short-lived bbolt read transactions; no read cache, reader pool, global lock, or long-lived read transaction was introduced.
+
 ## V5.30
 
 ### Read Engine 2.0 — hot-path allocation and cursor-start optimization

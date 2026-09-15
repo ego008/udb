@@ -237,7 +237,7 @@ func executeReadBatchSorted(ctx context.Context, engine *ReadEngine, ops []readB
 			return nil
 		}
 		c := bucket.Cursor()
-		k, v := c.Seek(first.key)
+		k, v := adaptiveCursor(c, first.key, defaultReadCursorOptions())
 		for _, op := range ops {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -273,7 +273,7 @@ func executeReadBatchSorted(ctx context.Context, engine *ReadEngine, ops []readB
 			return nil
 		}
 		c := bucket.Cursor()
-		k, v := c.Seek(first.key)
+		k, v := adaptiveCursor(c, first.key, defaultReadCursorOptions())
 		for _, op := range ops {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -430,7 +430,7 @@ func (db *DB) ZScoreManyContext(ctx context.Context, name string, keys [][]byte,
 
 func scanHashMany(ctx context.Context, b *bolt.Bucket, keys [][]byte, fn func(int, []byte, []byte, bool) error) error {
 	c := b.Cursor()
-	k, v := c.First()
+	k, v := adaptiveCursor(c, keys[0], defaultReadCursorOptions())
 	for i, key := range keys {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -451,7 +451,7 @@ func scanHashMany(ctx context.Context, b *bolt.Bucket, keys [][]byte, fn func(in
 
 func scanZScoreMany(ctx context.Context, b *bolt.Bucket, keys [][]byte, fn func(int, []byte, uint64, bool) error) error {
 	c := b.Cursor()
-	k, v := c.First()
+	k, v := adaptiveCursor(c, keys[0], defaultReadCursorOptions())
 	for i, key := range keys {
 		if err := ctx.Err(); err != nil {
 			return err

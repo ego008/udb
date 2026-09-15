@@ -128,6 +128,30 @@ go test -run '^$' -bench '^BenchmarkV529HGetMany100Sorted$' -benchmem -cpuprofil
 
 All database population is performed before `ResetTimer`, so the measured profile represents the read workload rather than benchmark setup writes.
 
+## V5.31 Read Engine 3.0 / Adaptive Cursor Start
+
+V5.31 addresses the access-pattern difference exposed by V5.30. A sorted cursor does not have one universally optimal starting operation: `First()+Next()` favors head ranges, while `Seek()+Next()` favors deep ranges. Since bbolt does not provide a cheap rank/ordinal API for a key, V5.31 uses a bounded probe.
+
+The default algorithm is:
+
+1. `Cursor.First()`
+2. advance at most `HeadProbeKeys` entries (default `8`)
+3. if the requested first key is reached, continue with sequential `Next()`
+4. otherwise restart with `Cursor.Seek(firstKey)` and continue sequentially
+
+This makes the extra work for deep ranges bounded while retaining the cheap head case. The algorithm is data-independent and does not assume numeric key names or a particular key encoding.
+
+Benchmarks should compare:
+- batch sizes `10 / 32 / 100 / 1000`;
+- head, middle, and deep starting positions;
+- direct Point `Get`;
+- `First+Next`;
+- `Seek+Next`;
+- `Adaptive`;
+- allocation counts and transaction setup costs.
+
+The read transaction remains short-lived because previous UDB versions demonstrated that long-lived bbolt readers can interfere with mmap growth.
+
 ## V5.30 Read Engine 2.0
 
 V5.30 targets the fixed overhead exposed by the V5.29 profile after the planner
