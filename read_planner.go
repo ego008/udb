@@ -18,6 +18,14 @@ type ReadPlannerOptions struct {
 	// HeadProbeKeys bounds the First+Next probe before a sorted cursor
 	// falls back to Seek. It is used by V5.31/V5.32 adaptive reads.
 	HeadProbeKeys int
+	// CostModel controls Point-vs-Cursor selection for sufficiently large
+	// sorted batches. Zero values use the V5.33 defaults.
+	CostModel ReadCostModelOptions
+	// CostModelMinKeys is the minimum batch size at which the V5.33 cost
+	// model is allowed to override the historical V5.29/V5.32 cursor
+	// threshold. This preserves compatibility for callers that intentionally
+	// lower MinCursorKeys for small-batch cursor experiments.
+	CostModelMinKeys int
 	// CursorStart selects the cursor access path when the planner chooses a
 	// cursor. Zero is normalized to ReadCursorAdaptive for compatibility with
 	// callers that construct ReadPlannerOptions using older fields only.
@@ -25,7 +33,7 @@ type ReadPlannerOptions struct {
 }
 
 func defaultReadPlannerOptions() ReadPlannerOptions {
-	return ReadPlannerOptions{MinCursorKeys: 16, LocalityThreshold: 0.50, MinLocalityKeys: 4, HeadProbeKeys: 8, CursorStart: ReadCursorAdaptive}
+	return ReadPlannerOptions{MinCursorKeys: 16, LocalityThreshold: 0.50, MinLocalityKeys: 4, HeadProbeKeys: 8, CostModel: defaultReadCostModelOptions(), CostModelMinKeys: 16, CursorStart: ReadCursorAdaptive}
 }
 
 type ReadPlan struct {
@@ -36,13 +44,15 @@ type ReadPlan struct {
 	AccessPath ReadAccessPath
 	// CursorStart describes how the sorted cursor path should position itself.
 	// It is ReadCursorAdaptive for production reads in V5.31.
-	CursorStart     ReadCursorStart
-	CursorProbeKeys int
-	Sorted          bool
-	KeyCount        int
-	Locality        float64
-	DuplicateRatio  float64
-	Reason          string
+	CursorStart         ReadCursorStart
+	CursorProbeKeys     int
+	EstimatedPointCost  float64
+	EstimatedCursorCost float64
+	Sorted              bool
+	KeyCount            int
+	Locality            float64
+	DuplicateRatio      float64
+	Reason              string
 }
 
 func PlanReadKeys(keys [][]byte) ReadPlan { return planReadKeys(keys, defaultReadPlannerOptions()) }
@@ -65,6 +75,13 @@ func normalizePlannerOptions(opts ReadPlannerOptions) ReadPlannerOptions {
 	}
 	if opts.HeadProbeKeys < 1 {
 		opts.HeadProbeKeys = 1
+	}
+	opts.CostModel = normalizeReadCostModelOptions(opts.CostModel)
+	if opts.CostModelMinKeys < opts.MinCursorKeys {
+		opts.CostModelMinKeys = opts.MinCursorKeys
+	}
+	if opts.CostModelMinKeys < 1 {
+		opts.CostModelMinKeys = 1
 	}
 	if opts.CursorStart != ReadCursorFirst && opts.CursorStart != ReadCursorSeek && opts.CursorStart != ReadCursorAdaptive {
 		opts.CursorStart = ReadCursorAdaptive
@@ -102,10 +119,15 @@ func planReadKeys(keys [][]byte, opts ReadPlannerOptions) ReadPlan {
 	plan.DuplicateRatio = float64(duplicates) / float64(len(keys)-1)
 	plan.Locality = localitySum / float64(len(keys)-1)
 	if len(keys) >= opts.MinCursorKeys {
-		plan.Path = ReadPathCursor
-		plan.CursorStart = opts.CursorStart
-		plan.AccessPath = accessPathFromCursorStart(opts.CursorStart)
-		plan.Reason = "sorted-enough-keys"
+		plan.EstimatedPointCost, plan.EstimatedCursorCost = estimateReadCosts(len(keys), plan.DuplicateRatio, opts.CostModel)
+		if len(keys) < opts.CostModelMinKeys || shouldUseCursorByCost(len(keys), plan.DuplicateRatio, opts.CostModel) {
+			plan.Path = ReadPathCursor
+			plan.CursorStart = opts.CursorStart
+			plan.AccessPath = accessPathFromCursorStart(opts.CursorStart)
+			plan.Reason = "sorted-enough-keys"
+			return plan
+		}
+		plan.Reason = "sorted-cost-point"
 		return plan
 	}
 	if len(keys) >= opts.MinLocalityKeys && (plan.Locality >= opts.LocalityThreshold || plan.DuplicateRatio >= 0.25) {
@@ -137,16 +159,27 @@ func planReadKeysFast(keys [][]byte, opts ReadPlannerOptions) ReadPlan {
 		return planReadKeys(keys, opts)
 	}
 
+	duplicates := 0
 	for i := 1; i < n; i++ {
-		if bytes.Compare(keys[i-1], keys[i]) > 0 {
+		cmp := bytes.Compare(keys[i-1], keys[i])
+		if cmp > 0 {
 			return plan
+		}
+		if cmp == 0 {
+			duplicates++
 		}
 	}
 	plan.Sorted = true
-	plan.Path = ReadPathCursor
-	plan.CursorStart = opts.CursorStart
-	plan.AccessPath = accessPathFromCursorStart(opts.CursorStart)
-	plan.Reason = "sorted-enough-keys"
+	plan.DuplicateRatio = float64(duplicates) / float64(n-1)
+	plan.EstimatedPointCost, plan.EstimatedCursorCost = estimateReadCosts(n, plan.DuplicateRatio, opts.CostModel)
+	if n < opts.CostModelMinKeys || shouldUseCursorByCost(n, plan.DuplicateRatio, opts.CostModel) {
+		plan.Path = ReadPathCursor
+		plan.CursorStart = opts.CursorStart
+		plan.AccessPath = accessPathFromCursorStart(opts.CursorStart)
+		plan.Reason = "sorted-enough-keys"
+		return plan
+	}
+	plan.Reason = "sorted-cost-point"
 	return plan
 }
 
@@ -187,10 +220,24 @@ func planReadOpsFastMode(ops []readBatchOp, opts ReadPlannerOptions, hot bool) R
 		}
 	}
 	plan.Sorted = true
-	plan.Path = ReadPathCursor
-	plan.CursorStart = opts.CursorStart
-	plan.AccessPath = accessPathFromCursorStart(opts.CursorStart)
-	plan.Reason = "sorted-enough-keys"
+	duplicates := 0
+	for i := 1; i < len(ops); i++ {
+		if bytes.Equal(ops[i-1].key, ops[i].key) {
+			duplicates++
+		}
+	}
+	plan.DuplicateRatio = float64(duplicates) / float64(len(ops)-1)
+	plan.EstimatedPointCost, plan.EstimatedCursorCost = estimateReadCosts(len(ops), plan.DuplicateRatio, opts.CostModel)
+	if len(ops) < opts.CostModelMinKeys || shouldUseCursorByCost(len(ops), plan.DuplicateRatio, opts.CostModel) {
+		plan.Path = ReadPathCursor
+		plan.CursorStart = opts.CursorStart
+		plan.AccessPath = accessPathFromCursorStart(opts.CursorStart)
+		// Preserve the V5.29/V5.30 diagnostic reason for the normal cursor
+		// decision so existing callers/tests remain compatible.
+		plan.Reason = "sorted-enough-keys"
+		return plan
+	}
+	plan.Reason = "sorted-cost-point"
 	return plan
 }
 
@@ -216,6 +263,7 @@ func planReadOpsFullSmall(ops []readBatchOp, opts ReadPlannerOptions) ReadPlan {
 	plan.DuplicateRatio = float64(duplicates) / float64(len(ops)-1)
 	plan.Locality = localitySum / float64(len(ops)-1)
 	if len(ops) >= opts.MinLocalityKeys && (plan.Locality >= opts.LocalityThreshold || plan.DuplicateRatio >= 0.25) {
+		plan.EstimatedPointCost, plan.EstimatedCursorCost = estimateReadCosts(len(ops), plan.DuplicateRatio, opts.CostModel)
 		plan.Path = ReadPathCursor
 		plan.CursorStart = opts.CursorStart
 		plan.AccessPath = accessPathFromCursorStart(opts.CursorStart)

@@ -736,3 +736,18 @@ bucket.
 The optimization is intentionally conservative: UDB still uses short-lived
 bbolt read transactions. V5.30 does not introduce long-lived read transactions,
 reader pools, global read locks, or a read cache.
+
+## V5.33 — Read Engine 5.0
+
+V5.33 adds a relative-cost model to the read planner. `ReadCostModelOptions`
+controls the estimated cost of Point and Cursor access, and `ReadPlan` exposes
+`EstimatedPointCost` and `EstimatedCursorCost` for diagnostics.
+
+The model is intentionally conservative and compatibility-oriented: unsorted
+reads remain Point, small clustered/duplicate sorted reads retain the V5.28
+locality decision, and sufficiently large sorted reads compare estimated Point
+and Cursor costs. Cursor positioning remains controlled by `CursorStart` from
+V5.32.
+
+The cost model is not tied to one machine's nanosecond timings. Tune its
+relative ratios only from repeatable target-machine benchmark evidence.

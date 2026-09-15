@@ -127,11 +127,3 @@ func BenchmarkV532PlanReadKeys100(b *testing.B) {
 		_ = planReadKeysFast(keys, opts)
 	}
 }
-
-func BenchmarkV532AccessPathString(b *testing.B) {
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = ReadAccessAdaptive.String()
-	}
-}

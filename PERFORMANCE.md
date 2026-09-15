@@ -224,3 +224,32 @@ The expected improvement is workload-dependent. The middle/tail sorted cases
 should benefit most from `Seek(firstKey)`; the allocation reduction is most
 visible in high-frequency managed reads. Use repeated `-count=5` runs and
 compare against the V5.29 baseline rather than relying on a single run.
+
+# V5.33 Read Access Cost Model
+
+V5.33 moves Point-vs-Cursor selection from a fixed large-batch rule toward a
+small deterministic relative-cost model.
+
+The default model is:
+
+```text
+PointPerKey    = 1.00
+CursorBase     = 12.00
+CursorPerKey   = 0.05
+DuplicateGain  = 0.50
+```
+
+These are relative units, not nanoseconds. The intended workflow is to run the
+V5.33 Point-vs-Seek matrix on the target machine and tune the ratios only when
+there is stable evidence that the workload differs materially from the defaults.
+
+Recommended benchmark:
+
+```bash
+go test -run '^$' -bench '^BenchmarkV533' -benchmem -count=5
+```
+
+The matrix covers 4/8/10/16/32/64/100/256/1000 keys, planner cost thresholds,
+and end-to-end sorted `HGetMany` behavior. Small clustered/duplicate batches
+retain the historical V5.28 locality rule for compatibility; sufficiently large
+sorted batches use the cost model.

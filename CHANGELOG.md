@@ -191,3 +191,24 @@ The design goal remains: **planner cost must stay smaller than the work it saves
 - Added V5.30 benchmark coverage for head/middle/tail sorted ranges and random batches.
 - No long-lived bbolt read transactions, reader pools, global read locks, or read caches were introduced.
 - No changes to storage format, recovery, integrity, durability, write ordering, or public ownership semantics.
+
+## V5.33 — Read Engine 5.0 / Data-Driven Access Cost Model
+
+V5.33 adds a deterministic relative-cost model for the Point-vs-Cursor decision.
+The model is deliberately expressed in dimensionless cost units rather than
+machine-specific nanoseconds, so it can be tuned from the target application's
+benchmark results.
+
+Added:
+
+- `ReadCostModelOptions` with Point, Cursor setup/traversal and duplicate-discount costs.
+- `ReadPlan.EstimatedPointCost` and `ReadPlan.EstimatedCursorCost` diagnostics.
+- Cost-based selection for sufficiently large sorted batches.
+- Duplicate-aware cursor cost estimation.
+- Compatibility-preserving V5.28 small-locality behavior.
+- V5.33 benchmarks comparing Point and Seek across 4/8/10/16/32/64/100/256/1000 keys.
+- Planner threshold benchmarks and cost-model unit tests.
+
+The model does not inspect or cache bbolt internals, does not introduce a
+long-lived read transaction, reader pool, global lock, or read cache, and does
+not change storage, recovery, durability, integrity, or write semantics.
