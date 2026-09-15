@@ -98,3 +98,17 @@
 - Added V5.24 read-engine correctness, ownership, batch-read, and scan regression tests.
 - Added read-path benchmarks comparing single transactions, grouped `ReadTransaction` calls, batch reads, and ZScan/ZScanEach.
 - No changes to recovery, integrity, Snapshot, lifecycle, or default durability semantics.
+
+## V5.25
+
+### ReadSession and ownership-safe iterators
+
+- Added reusable `ReadSession` for high-level Hash/ZSet reads.
+- Added `ReadSession.Read` / `ReadContext` for grouping reads inside one short-lived consistent transaction.
+- Added `HIterator` / `ZIterator` and forward/reverse constructors.
+- Iterators materialize their requested range and release the bbolt read transaction before returning.
+- Iterator data is copied and remains valid after the source transaction closes.
+- Added regressions proving a slow iterator consumer does not hold a read transaction and block writes.
+- Added context cancellation and idempotent session/iterator close tests.
+- Preserved V5.24 ReadEngine, Snapshot, lifecycle, recovery, integrity and durability semantics.
+- No long-lived bbolt read transaction is introduced by V5.25.

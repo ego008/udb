@@ -511,3 +511,62 @@ Snapshot metrics as well.
 V5.24 adds a transaction-scoped `ReadEngine` that unifies point reads and scan reads while keeping bbolt transactions private behind UDB's `Tx` type. It provides `HGet`, `HGetInt`, `ZGet`, `ZScore`, `HGetBatch`, `ZGetBatch`, `HScan`, `HRScan`, `ZScan`, `ZRScan`, and `ZScanEach` on a single read transaction.
 
 High-level `HGetInt`, `ZScore`, `HGetBatch`, and `ZGetBatch` helpers are also available. `ReadTransaction` remains the recommended way to group many reads into one consistent snapshot and avoid paying transaction-admission overhead for every individual lookup. Returned `Reply` bytes remain ownership-safe copies.
+
+## V5.25 ReadSession / Iterator
+
+V5.25 adds a reusable `ReadSession` and ownership-safe `HIterator` / `ZIterator` APIs.
+The key design rule is that these objects **never keep a bbolt read transaction open
+between calls**. This is intentional: V5.22 demonstrated that a long-lived bbolt
+read transaction can prevent mmap growth and make later write commits wait.
+
+### ReadSession
+
+```go
+session, err := db.NewReadSession()
+if err != nil { return err }
+defer session.Close()
+
+r := session.HGet("users", []byte("alice"))
+```
+
+`ReadSession` is a reusable high-level read handle. Individual methods use short
+managed `View` transactions. For a group of reads that must observe one consistent
+view, use `Read` / `ReadContext`:
+
+```go
+err = session.Read(func(r *udb.ReadEngine) error {
+    a := r.HGet("users", []byte("alice"))
+    b := r.ZScore("rank", []byte("alice"))
+    // consume results here; do not retain r or Bolt-backed buffers.
+    return nil
+})
+```
+
+The transaction exists only for the callback. After the callback returns, the
+transaction is released.
+
+### Iterator
+
+`NewHIterator` / `NewHRIterator` and `NewZIterator` / `NewZRIterator` capture the
+requested ordered range during one short read transaction, then expose the result
+through ordinary Go memory:
+
+```go
+it, err := db.NewZIterator("rank", nil, nil, 1000)
+if err != nil { return err }
+defer it.Close()
+
+for it.Next() {
+    fmt.Println(string(it.Member()), it.Score())
+}
+if err := it.Err(); err != nil { return err }
+```
+
+Iterator `Key`, `Value`, and `Member` slices are owned by the iterator and remain
+valid after the source transaction closes. A slow consumer therefore does not hold
+a bbolt read transaction open and cannot block ordinary writes or mmap growth.
+The trade-off is memory proportional to the iterator result size.
+
+Context constructors (`NewHIteratorContext` / `NewZIteratorContext`) reject an
+already-cancelled context before opening the read transaction. Context cancellation
+does not interrupt an already-running bbolt operation.
